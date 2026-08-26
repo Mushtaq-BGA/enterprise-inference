@@ -5,7 +5,7 @@ a model serving, use **Customize** to add models and tune the engines, then look
 things up in **Reference**.
 
 > New here? The three-step quick start is in the [project README](../README.md#quick-start).
-> This layer is a component of [Intel® AI for Enterprise Solutions](https://github.com/intel-innersource/applications.ai.enterprise.ai-solutions) — install that platform first.
+> This layer is a component of [Intel® AI for Enterprise Solutions](https://github.com/Mushtaq-BGA/enterprise-ai-solutions) — install that platform first.
 
 ## Deploy
 

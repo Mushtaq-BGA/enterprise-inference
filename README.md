@@ -1,7 +1,7 @@
 # Intel® Enterprise for AI Inference
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![Component of: AI Solutions](https://img.shields.io/badge/Component%20of-AI%20Solutions-0068B5)](https://github.com/intel-innersource/applications.ai.enterprise.ai-solutions)
+[![Component of: AI Solutions](https://img.shields.io/badge/Component%20of-AI%20Solutions-0068B5)](https://github.com/Mushtaq-BGA/enterprise-ai-solutions)
 [![Platform: Intel Xeon](https://img.shields.io/badge/Platform-Intel%C2%AE%20Xeon%C2%AE-0068B5)](https://www.intel.com/xeon)
 [![Serving: KServe](https://img.shields.io/badge/Serving-KServe-326CE5)](https://kserve.github.io/website/)
 [![Runtimes: vLLM · OVMS](https://img.shields.io/badge/Runtimes-vLLM%20%C2%B7%20OVMS-purple)](https://vllm.ai)
@@ -13,7 +13,7 @@
 
 > [!IMPORTANT]
 > **This repository is not used standalone.** It is a component of the
-> [**ai-solutions**](https://github.com/intel-innersource/applications.ai.enterprise.ai-solutions)
+> [**ai-solutions**](https://github.com/Mushtaq-BGA/enterprise-ai-solutions)
 > platform and is cloned into it at `ext/enterprise.ai-inference/`. Install the core platform
 > first — it provisions the Kubernetes cluster and the platform services (cert-manager, Istio,
 > MetalLB, Envoy Gateway, PostgreSQL, Keycloak, MinIO, observability) that this layer depends on.
@@ -51,19 +51,19 @@ An inference request enters through the **LLM gateway**, which authenticates and
 
 > [!NOTE]
 > **Prerequisite:** this layer is not standalone. `es_auto_installer.sh` is the installer
-> from the [**Intel® Enterprise for AI Solutions**](https://github.com/intel-innersource/applications.ai.enterprise.ai-solutions)
+> from the [**Intel® Enterprise for AI Solutions**](https://github.com/Mushtaq-BGA/enterprise-ai-solutions)
 > repo, which clones this repository into `ext/enterprise.ai-inference/`. Clone that repo, prep the
 > machine, and create an environment, then run every command below from its root:
 >
 > ```bash
-> git clone https://github.com/intel-innersource/applications.ai.enterprise.ai-solutions.git
+> git clone https://github.com/Mushtaq-BGA/enterprise-ai-solutions.git
 > cd applications.ai.enterprise.ai-solutions
 > ./es_auto_installer.sh configure && ./es_auto_installer.sh init local
 > ```
 >
 > This layer needs the cluster, gateway, auth, and storage its dependency layers provide — the
 > `install inference` step below auto-pulls them. Full list →
-> [solutions Prerequisites](https://github.com/intel-innersource/applications.ai.enterprise.ai-solutions/blob/main/docs/quickstart/prerequisites.md).
+> [solutions Prerequisites](https://github.com/Mushtaq-BGA/enterprise-ai-solutions/blob/main/docs/quickstart/prerequisites.md).
 
 ### Step 1 — Install the inference stack
 
@@ -159,8 +159,8 @@ Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses
 ## Links
 
 - [Documentation Index](docs/README.md)
-- [GitHub Repository](https://github.com/intel-innersource/applications.ai.enterprise.ai-inference)
-- [Intel® Enterprise for AI Solutions (core platform)](https://github.com/intel-innersource/applications.ai.enterprise.ai-solutions)
+- [GitHub Repository](https://github.com/Mushtaq-BGA/enterprise-inference)
+- [Intel® Enterprise for AI Solutions (core platform)](https://github.com/Mushtaq-BGA/enterprise-ai-solutions)
 - [Architecture](docs/reference/architecture.md)
 - [Inference Request Flow](docs/reference/request_flow.md)
 
