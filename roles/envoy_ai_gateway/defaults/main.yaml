@@ -1,0 +1,18 @@
+---
+envoy_ai_gateway_version: "0.6.0"
+envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
+envoy_ai_gateway_helm_repo: "oci://docker.io/envoyproxy"
+envoy_ai_gateway_wait_timeout: "300s"
+
+# AI Gateway resource — created in kserve namespace for InferencePool routing
+ai_gateway_create: true
+ai_gateway_name: "ai-gateway"
+ai_gateway_class_name: "inference-pool-with-aigwroute"
+ai_gateway_namespace: "{{ kserve_llmisvc_namespace | default('llm-inference') }}"
+
+# Stable service name for the AI Gateway data-plane (avoids hash-suffix from Envoy Gateway).
+# Internal consumers can reach it at: <name>.<ai_gateway_namespace>.svc.cluster.local:80
+ai_gateway_service_name: "ai-gateway"
+
+# External inference hostname (eg-gateway TLS listener → ai-gateway)
+inference_hostname: "inference.{{ base_domain_name | default('inference-example.com') }}"

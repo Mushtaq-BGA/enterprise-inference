@@ -1,0 +1,94 @@
+---
+# =============================================================================
+# LLM Services — inference namespace, ServingRuntimes, CRD readiness
+# =============================================================================
+# Unified role for both InferenceService and LLMInferenceService workloads.
+# Creates the target namespace and deploys optional ServingRuntimes for the
+# traditional InferenceService path.  LLMInferenceService workloads use
+# LLMInferenceServiceConfig templates from the kserve-runtime-configs chart.
+# =============================================================================
+
+# =============================================================================
+# CPU Policy — controls how model pods get pinned to CPUs.
+# =============================================================================
+# This is the single switch. All dependent behaviour (NRI install, kubelet
+# flags, model-manager annotations, CPU request doubling) is auto-derived.
+#
+#   nri-balloons    (default) NRI balloons resource policy — NUMA-aware pinning
+#   kubelet-static  kubelet static CPU manager (Guaranteed QoS pinning)
+#   best-effort     no pinning, standard scheduler
+kubernetes_cpu_policy: "nri-balloons"
+
+# NRI Balloons tuning (only when kubernetes_cpu_policy=nri-balloons):
+nri_reserved_cpu_list: ""                # Linux cpuset for system CPUs — set 1 per NUMA for multi-NUMA (e.g. "0,32")
+nri_deployment_profile: "standard"       # minimal(8) | standard(12) | observability(16) | full(20)
+
+# kubelet-static tuning (only when kubernetes_cpu_policy=kubelet-static).
+# SMT width (hyperthreads per physical core), used to satisfy kubelet's
+# full-pcpus-only option: a Guaranteed pod's cpu request must be a multiple of
+# this, else kubelet rejects the pod with SMTAlignmentError. Empty ⇒
+# model-manager auto-detects (2 when full-pcpus-only is on, else 1). Set to 1
+# on an SMT/hyperthreading-disabled cluster to avoid rounding cpu up to even.
+mm_kubelet_threads_per_core: ""
+
+llm_services_namespace: "llm-inference"
+
+# =============================================================================
+# Model storage PVC
+# =============================================================================
+llm_services_model_store_pvc: "model-store"
+llm_services_model_store_size: "100Gi"
+llm_services_model_store_access_mode: >-
+  {{ 'ReadWriteOnce' if storage_backend | default('local-path') == 'local-path'
+     else 'ReadWriteMany' }}
+llm_services_model_store_storage_class: >-
+  {{ 'local-path' if storage_backend | default('local-path') == 'local-path'
+     else 'nfs-client' if storage_backend == 'nfs'
+     else 'ceph-fs' if storage_backend == 'ceph'
+     else 'local-path' }}
+
+# Deploy files/runtimes/*.yaml as namespace-scoped ServingRuntimes.
+# Needed for InferenceService CRs; LLMInferenceService CRs ignore these.
+llm_services_deploy_runtimes: true
+
+# Deploy default models after infrastructure is ready
+# Set to false to skip model deployment during installation
+# Override via: ./es_auto_installer.sh install inference --skip-models
+llm_services_deploy_models: true
+
+# Extra flags appended to each `model-manager deploy <name> --wait` invocation.
+# Examples:
+#   model_deploy_flags: "--wait-timeout 1800"   # allow longer for large models
+#   model_deploy_flags: "--dry-run"             # render manifests without applying
+model_deploy_flags: ""
+
+# Auto-deploy failure policy. Default (false): a model that fails to auto-deploy
+# (e.g. gated model without HF_TOKEN, transient download error) is reported but
+# does NOT abort the install — the serving infrastructure is already up and
+# models can be deployed manually afterward. Set true to make any auto-deploy
+# failure fatal to the install.
+model_deploy_strict: false
+
+# =============================================================================
+# Inference engine observability
+# =============================================================================
+# Each engine listed here gets a ServiceMonitor (Prometheus scraping) and a
+# Grafana dashboard auto-deployed from files/servicemonitors/ and files/dashboards/.
+#
+# To add a new engine (e.g. triton):
+#   1. Add files/servicemonitors/triton.yaml
+#   2. Add files/dashboards/triton.json
+#   3. Add 'triton' to this list
+#
+# To disable without removing files, remove the name from the list.
+# =============================================================================
+# Engine name is derived from kubernetes_accelerator so the right dashboard
+# (cpu = no GPU panels, gpu = full dashboard with KV cache gauges) deploys
+# automatically. Override here if you need a different combination.
+llm_services_engines:
+  - "vllm-{{ kubernetes_accelerator | default('cpu') }}"
+
+# Skip ServiceMonitor + dashboard deployment if observability stack is absent.
+llm_services_observability_enabled: "{{ observability_enabled | default(true) | bool }}"
+# Enable ambient mode label on namespace if Istio is enabled in the cluster
+istio_enabled: false

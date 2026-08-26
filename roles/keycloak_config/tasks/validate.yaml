@@ -1,0 +1,17 @@
+---
+# =============================================================================
+# Keycloak Config — Validate
+# =============================================================================
+
+- name: "keycloak_config | Validate client secret exists"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ keycloak_client_secret_name }}"
+    namespace: "{{ keycloak_namespace }}"
+  register: _kcc_secret
+  failed_when: (_kcc_secret.resources | default([]) | length) == 0
+
+- name: "keycloak_config | Client secret present"
+  ansible.builtin.debug:
+    msg: "{{ keycloak_client_secret_name }} exists in {{ keycloak_namespace }}."

@@ -1,0 +1,18 @@
+# =============================================================================
+# OpenVINO Model Server (OVMS) runtime — low-level plumbing
+# =============================================================================
+# OVMS deploy config (env, per-category defaults) lives in models.yaml →
+# runtimes.openvino. This file holds only the low-level plumbing merged in at
+# load time. OVMS is a flat runtime with no version axis — server_version is
+# not applicable, and requesting one via --server-version aborts with a clear
+# message.
+# =============================================================================
+
+image: "openvino/model_server:2026.3"                       # serving image; injected into the ClusterServingRuntime (override in models.yaml → runtimes.openvino.image)
+model_downloader_image: "openvino/model_server:2026.1-py"   # weights download inside a job
+device: cpu
+kind: InferenceService
+format: openvino
+runtime_name: openvino-runtime                              # ClusterServingRuntime to reference
+routing: aigateway
+serving_runtime_manifest: openvino/serving-runtime.yaml     # raw CR manifest applied on first deploy

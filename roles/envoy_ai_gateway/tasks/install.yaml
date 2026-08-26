@@ -1,0 +1,313 @@
+---
+# =============================================================================
+# Envoy AI Gateway — Install / Upgrade CRDs + Controller via Helm (OCI)
+# =============================================================================
+
+- name: "envoy_ai_gateway | Check for existing Helm release"
+  kubernetes.core.helm_info:
+    name: aieg
+    release_namespace: "{{ envoy_ai_gateway_namespace }}"
+  register: _eag_release
+  failed_when: false
+
+- name: "envoy_ai_gateway | Detect version"
+  ansible.builtin.set_fact:
+    _eag_installed_chart: "{{ _eag_release.status.chart | default('') }}"
+    _eag_target_chart: "ai-gateway-helm-v{{ envoy_ai_gateway_version }}"
+
+- name: "envoy_ai_gateway | Status"
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Upgrading' if _eag_installed_chart and _eag_installed_chart != _eag_target_chart
+         else ('Already at v' ~ envoy_ai_gateway_version ~ ' — reconciling') if _eag_installed_chart
+         else 'Fresh install' }}
+      Envoy AI Gateway v{{ envoy_ai_gateway_version }}
+      {{ ('(from ' ~ _eag_installed_chart ~ ')') if _eag_installed_chart and _eag_installed_chart != _eag_target_chart else '' }}
+
+- name: "envoy_ai_gateway | Label namespace — Istio"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ envoy_ai_gateway_namespace }}"
+        labels:
+          istio.io/dataplane-mode: "ambient"
+  when: istio_enabled | default(false) | bool
+
+# Host-network apiserver (no mesh identity) can't reach the AI-gateway controller's
+# admission webhook under mesh-wide STRICT; open only its port, rest of the pod STRICT.
+- name: "envoy_ai_gateway | Allow apiserver to reach controller webhook (port-level mTLS)"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: security.istio.io/v1
+      kind: PeerAuthentication
+      metadata:
+        name: allow-webhook
+        namespace: "{{ envoy_ai_gateway_namespace }}"
+      spec:
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: ai-gateway-helm
+        mtls:
+          mode: STRICT
+        portLevelMtls: "{{ {'9443': {'mode': 'PERMISSIVE'}} }}"
+  when: istio_enabled | default(false) | bool
+
+- name: "envoy_ai_gateway | Label namespace — PSS"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ envoy_ai_gateway_namespace }}"
+        labels:
+          pod-security.kubernetes.io/enforce: "privileged"
+          pod-security.kubernetes.io/audit: "privileged"
+          pod-security.kubernetes.io/warn: "privileged"
+  when: enforce_pss | default(false) | bool
+
+- name: "envoy_ai_gateway | Install/upgrade CRDs via Helm (OCI)"
+  when: >-
+    _eag_release.status is not defined or
+    _eag_release.status is none or
+    _eag_installed_chart != _eag_target_chart
+  kubernetes.core.helm:
+    name: aieg-crd
+    chart_ref: "{{ envoy_ai_gateway_helm_repo }}/ai-gateway-crds-helm"
+    release_namespace: "{{ envoy_ai_gateway_namespace }}"
+    create_namespace: true
+    chart_version: "v{{ envoy_ai_gateway_version }}"
+    wait: true
+    timeout: "5m0s"
+
+- name: "envoy_ai_gateway | Install/upgrade controller via Helm (OCI)"
+  when: >-
+    _eag_release.status is not defined or
+    _eag_release.status is none or
+    _eag_installed_chart != _eag_target_chart
+  kubernetes.core.helm:
+    name: aieg
+    chart_ref: "{{ envoy_ai_gateway_helm_repo }}/ai-gateway-helm"
+    release_namespace: "{{ envoy_ai_gateway_namespace }}"
+    chart_version: "v{{ envoy_ai_gateway_version }}"
+    values:
+      controller:
+        affinity: "{{ _platform_affinity | default({}) }}"
+    wait: true
+    timeout: "5m0s"
+
+- name: "envoy_ai_gateway | Wait for controller deployment"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: ai-gateway-controller
+    namespace: "{{ envoy_ai_gateway_namespace }}"
+  register: _eag_deploy
+  until:
+    - _eag_deploy.resources | length > 0
+    - _eag_deploy.resources[0].status.conditions | default([]) | selectattr('type','eq','Available') | selectattr('status','eq','True') | list | length > 0
+  retries: 60
+  delay: 5
+
+- name: "envoy_ai_gateway | Install/upgrade complete"
+  ansible.builtin.debug:
+    msg: "Envoy AI Gateway v{{ envoy_ai_gateway_version }} ready in {{ envoy_ai_gateway_namespace }}."
+
+# ── AI Gateway GatewayClass + Gateway (for InferencePool routing) ────────────
+
+- name: "envoy_ai_gateway | Ensure AI Gateway namespace exists"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ai_gateway_namespace }}"
+  when: ai_gateway_create | bool
+
+- name: "envoy_ai_gateway | Label AI Gateway namespace — Istio"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ai_gateway_namespace }}"
+        labels:
+          istio.io/dataplane-mode: "ambient"
+  when:
+    - ai_gateway_create | bool
+    - istio_enabled | default(false) | bool
+
+- name: "envoy_ai_gateway | Label AI Gateway namespace — PSS"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ai_gateway_namespace }}"
+        labels:
+          pod-security.kubernetes.io/enforce: "restricted"
+          pod-security.kubernetes.io/audit: "restricted"
+          pod-security.kubernetes.io/warn: "restricted"
+  when:
+    - ai_gateway_create | bool
+    - enforce_pss | default(false) | bool
+
+- name: "envoy_ai_gateway | Create EnvoyProxy config (ClusterIP + data-plane affinity)"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: EnvoyProxy
+      metadata:
+        name: ai-gateway-proxy-config
+        namespace: "{{ ai_gateway_namespace }}"
+      spec:
+        provider:
+          type: Kubernetes
+          kubernetes:
+            envoyService:
+              type: ClusterIP
+              name: "{{ ai_gateway_service_name }}"
+            envoyDeployment:
+              pod:
+                affinity: "{{ _platform_affinity | default({}) }}"
+  when: ai_gateway_create | bool
+
+- name: "envoy_ai_gateway | Create GatewayClass for AI Gateway"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: GatewayClass
+      metadata:
+        name: "{{ ai_gateway_class_name }}"
+      spec:
+        controllerName: gateway.envoyproxy.io/gatewayclass-controller
+        parametersRef:
+          group: gateway.envoyproxy.io
+          kind: EnvoyProxy
+          name: ai-gateway-proxy-config
+          namespace: "{{ ai_gateway_namespace }}"
+  when: ai_gateway_create | bool
+
+- name: "envoy_ai_gateway | Create AI Gateway namespace"
+  kubernetes.core.k8s:
+    kind: Namespace
+    name: "{{ ai_gateway_namespace }}"
+    state: present
+  when: ai_gateway_create | bool
+
+- name: "envoy_ai_gateway | Create AI Gateway resource"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata:
+        name: "{{ ai_gateway_name }}"
+        namespace: "{{ ai_gateway_namespace }}"
+      spec:
+        gatewayClassName: "{{ ai_gateway_class_name }}"
+        listeners:
+          - name: http
+            protocol: HTTP
+            port: 80
+            allowedRoutes:
+              namespaces:
+                from: All
+  when: ai_gateway_create | bool
+
+# ServiceMonitors require Prometheus Operator CRDs which are installed by the
+# observability role (runs after envoy_ai_gateway). Skip silently if not yet present.
+- name: "envoy_ai_gateway | Check if Prometheus Operator CRDs are available"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: servicemonitors.monitoring.coreos.com
+  register: _aieg_sm_crd
+  failed_when: false
+
+- name: "envoy_ai_gateway | Create ServiceMonitor for AI Gateway controller"
+  when: (_aieg_sm_crd.resources | default([])) | length > 0
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: monitoring.coreos.com/v1
+      kind: ServiceMonitor
+      metadata:
+        name: ai-gateway-controller
+        namespace: "{{ envoy_ai_gateway_namespace }}"
+        labels:
+          app: ai-gateway
+      spec:
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: ai-gateway-helm
+            app.kubernetes.io/instance: aieg
+        namespaceSelector:
+          matchNames:
+            - "{{ envoy_ai_gateway_namespace }}"
+        endpoints:
+          - port: http-metrics
+            path: /metrics
+            interval: 30s
+
+- name: "envoy_ai_gateway | ServiceMonitor skipped (Prometheus Operator not yet installed)"
+  when: (_aieg_sm_crd.resources | default([])) | length == 0
+  ansible.builtin.debug:
+    msg: "Prometheus Operator CRDs not found — AI Gateway ServiceMonitor will be created by the observability role."
+
+- name: "envoy_ai_gateway | Wait for AI Gateway to be accepted"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ ai_gateway_name }}"
+    namespace: "{{ ai_gateway_namespace }}"
+  register: _aig_status
+  until:
+    - _aig_status.resources | length > 0
+    - _aig_status.resources[0].status.conditions | default([]) | selectattr('type','eq','Accepted') | selectattr('status','eq','True') | list | length > 0
+  retries: 60
+  delay: 5
+  when: ai_gateway_create | bool
+
+# ── External ingress: eg-gateway → ai-gateway HTTPRoute ──────────────────────
+# Single HTTPRoute on eg-gateway that forwards all inference traffic to
+# ai-gateway. Per-model AIGatewayRoutes/HTTPRoutes on ai-gateway handle
+# model dispatch. Hostname: inference.<base_domain_name>.
+
+- name: "envoy_ai_gateway | Create external inference HTTPRoute (eg-gateway → ai-gateway)"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: inference-external
+        namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
+        labels:
+          app.kubernetes.io/managed-by: envoy-ai-gateway-role
+      spec:
+        hostnames:
+          - "{{ inference_hostname }}"
+        parentRefs:
+          - name: "{{ envoy_gateway_name | default('eg-gateway') }}"
+            namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
+            sectionName: https
+        rules:
+          - matches:
+              - path:
+                  type: PathPrefix
+                  value: /
+            backendRefs:
+              - name: "{{ ai_gateway_service_name }}"
+                namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
+                port: 80
+  when: ai_gateway_create | bool

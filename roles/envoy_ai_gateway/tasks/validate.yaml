@@ -1,0 +1,24 @@
+---
+# =============================================================================
+# Envoy AI Gateway — Validate
+# =============================================================================
+
+- name: "envoy_ai_gateway | Check controller deployment"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: ai-gateway-controller
+    namespace: "{{ envoy_ai_gateway_namespace }}"
+  register: _eag_deploy
+
+- name: "envoy_ai_gateway | Assert controller running"
+  ansible.builtin.assert:
+    that:
+      - _eag_deploy.resources | length > 0
+      - (_eag_deploy.resources[0].status.readyReplicas | default(0) | int) >= 1
+    fail_msg: "AI Gateway controller has 0 ready replicas"
+    success_msg: "AI Gateway controller has {{ _eag_deploy.resources[0].status.readyReplicas | default(0) }} ready replica(s)"
+
+- name: "envoy_ai_gateway | Validation passed"
+  ansible.builtin.debug:
+    msg: "Envoy AI Gateway validation passed."

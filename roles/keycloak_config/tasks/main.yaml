@@ -1,0 +1,3 @@
+---
+- name: "keycloak_config | Include {{ component_action | default('install') }}"
+  ansible.builtin.include_tasks: "{{ component_action | default('install') }}.yaml"

@@ -1,0 +1,27 @@
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: aigw-{{MODEL_NAME}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: {{MODEL_NAME}}
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{AI_GATEWAY_NAME}}
+      namespace: {{AI_GATEWAY_NAMESPACE}}
+      sectionName: http
+  rules:
+    - matches:
+        - headers:
+            - name: x-ai-eg-model
+              type: Exact
+              value: {{MODEL_NAME}}
+      timeouts:
+        request: {{ROUTE_TIMEOUT}}
+      backendRefs:
+        - name: {{POOL_NAME}}
+          kind: InferencePool
+          group: inference.networking.k8s.io

@@ -1,0 +1,7 @@
+---
+- name: "litellm | Dispatch action: {{ component_action | default('install') }}"
+  ansible.builtin.include_tasks: "{{ component_action | default('install') }}.yaml"
+  when: >-
+    (component_action | default('install')) != 'install' or
+    (litellm_enabled | default(false) | bool) or
+    (auth_provider | default('keycloak')) == 'litellm'

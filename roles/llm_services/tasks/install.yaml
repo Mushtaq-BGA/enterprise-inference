@@ -1,0 +1,128 @@
+---
+# =============================================================================
+# LLM Services — namespace + CRD readiness + optional ServingRuntimes
+# =============================================================================
+
+- name: "llm_services | Create namespace"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ llm_services_namespace }}"
+
+- name: "llm_services | Label namespace — Istio"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ llm_services_namespace }}"
+        labels:
+          istio.io/dataplane-mode: "ambient"
+  when: istio_enabled | default(false) | bool
+
+- name: "llm_services | Label namespace — PSS"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ llm_services_namespace }}"
+        labels:
+          pod-security.kubernetes.io/enforce: "restricted"
+          pod-security.kubernetes.io/audit: "restricted"
+          pod-security.kubernetes.io/warn: "restricted"
+  when: enforce_pss | default(false) | bool
+
+# -- Model storage PVC --
+
+- name: "llm_services | Create model-store PVC"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: "{{ llm_services_model_store_pvc }}"
+        namespace: "{{ llm_services_namespace }}"
+        labels:
+          app.kubernetes.io/name: "{{ llm_services_model_store_pvc }}"
+          app.kubernetes.io/managed-by: ansible
+      spec:
+        accessModes:
+          - "{{ llm_services_model_store_access_mode }}"
+        resources:
+          requests:
+            storage: "{{ llm_services_model_store_size }}"
+        storageClassName: "{{ llm_services_model_store_storage_class }}"
+
+# -- CRD readiness gates (fail fast if KServe isn't installed) --
+
+- name: "llm_services | Verify InferenceService CRD"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: inferenceservices.serving.kserve.io
+  register: _llm_isvc_crd
+  failed_when: _llm_isvc_crd.resources | length == 0
+
+- name: "llm_services | Check LLMInferenceService CRD"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: llminferenceservices.serving.kserve.io
+  register: _llm_llmisvc_crd
+  failed_when: false
+
+- name: "llm_services | LLMInferenceService CRD status"
+  ansible.builtin.debug:
+    msg: >-
+      LLMInferenceService CRD: {{ 'available' if _llm_llmisvc_crd.resources | length > 0 else 'not found (LLMIsvc workloads unavailable)' }}
+
+# -- ServingRuntimes (used by InferenceService CRs) --
+
+- name: "llm_services | Find serving runtimes"
+  ansible.builtin.find:
+    paths: "{{ role_path }}/files/runtimes"
+    patterns: "*.yaml"
+  register: _llm_runtime_files
+  when: llm_services_deploy_runtimes | bool
+
+- name: "llm_services | Deploy serving runtimes"
+  kubernetes.core.k8s:
+    src: "{{ item.path }}"
+    namespace: "{{ llm_services_namespace }}"
+    state: present
+  loop: "{{ _llm_runtime_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: llm_services_deploy_runtimes | bool and (_llm_runtime_files.files | default([]) | length > 0)
+
+# ── Observability (ServiceMonitors + Grafana dashboards per engine) ───────────
+
+- name: "llm_services | Wire up engine observability"
+  ansible.builtin.include_tasks: observability.yaml
+  when: llm_services_observability_enabled | bool
+
+- name: "llm_services | Install complete"
+  ansible.builtin.debug:
+    msg: >-
+      Namespace '{{ llm_services_namespace }}' ready.
+      ServingRuntimes: {{ (_llm_runtime_files.files | default([]) | length) if llm_services_deploy_runtimes | bool else 'skipped' }}.
+      InferenceService: supported.
+      LLMInferenceService: {{ 'supported' if _llm_llmisvc_crd.resources | length > 0 else 'unavailable' }}.
+      Observability engines: {{ llm_services_engines | join(', ') if llm_services_observability_enabled | bool else 'skipped' }}.
+
+# -- Optional: Deploy default models --
+
+- name: "llm_services | Set inference extension directory"
+  set_fact:
+    inference_extension_dir: "{{ playbook_dir }}/../ext/enterprise.ai-inference"
+
+- name: "llm_services | Deploy default models"
+  include_tasks: deploy_models.yaml
+  when: llm_services_deploy_models | default(true) | bool

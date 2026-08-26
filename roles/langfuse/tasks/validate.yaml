@@ -1,0 +1,38 @@
+---
+# =============================================================================
+# Langfuse — Validate
+# =============================================================================
+
+- name: "langfuse | validate | Check web deployment"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    label_selectors:
+      - "app.kubernetes.io/component=web"
+      - "app.kubernetes.io/instance=langfuse"
+    namespace: "{{ langfuse_namespace }}"
+  register: _val_web
+  failed_when: >-
+    _val_web.resources | default([]) | length == 0 or
+    _val_web.resources[0].status.conditions | default([]) |
+    selectattr('type','eq','Available') | selectattr('status','eq','True') | list | length == 0
+
+- name: "langfuse | validate | Check worker deployment"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    label_selectors:
+      - "app.kubernetes.io/component=worker"
+      - "app.kubernetes.io/instance=langfuse"
+    namespace: "{{ langfuse_namespace }}"
+  register: _val_worker
+  failed_when: >-
+    _val_worker.resources | default([]) | length == 0 or
+    _val_worker.resources[0].status.conditions | default([]) |
+    selectattr('type','eq','Available') | selectattr('status','eq','True') | list | length == 0
+
+- name: "langfuse | validate | Summary"
+  ansible.builtin.debug:
+    msg:
+      - "Langfuse web: {{ 'OK' if _val_web.resources | length > 0 else 'FAIL' }}"
+      - "Langfuse worker: {{ 'OK' if _val_worker.resources | length > 0 else 'FAIL' }}"

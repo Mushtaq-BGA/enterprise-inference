@@ -1,0 +1,87 @@
+---
+# =============================================================================
+# KServe validation — covers Standard, Knative & LLMIsvc
+# =============================================================================
+
+# ── Core checks (all modes) ─────────────────────────────────────────────────
+
+- name: "kserve | Check InferenceService CRD"
+  ansible.builtin.command:
+    cmd: kubectl get crd inferenceservices.serving.kserve.io
+  changed_when: false
+
+- name: "kserve | Check controller deployment"
+  ansible.builtin.command:
+    cmd: "kubectl get deployment kserve-controller-manager -n {{ kserve_namespace }}"
+  changed_when: false
+
+- name: "kserve | Check controller ready replicas"
+  ansible.builtin.command:
+    cmd: "kubectl get deployment kserve-controller-manager -n {{ kserve_namespace }} -o jsonpath='{.status.readyReplicas}'"
+  changed_when: false
+  register: _kserve_ready
+
+- name: "kserve | Assert controller ready"
+  ansible.builtin.assert:
+    that: (_kserve_ready.stdout | default('0') | int) >= 1
+    fail_msg: "KServe controller has 0 ready replicas"
+    success_msg: "KServe controller has {{ _kserve_ready.stdout }} ready replica(s)"
+
+- name: "kserve | Check cert-manager"
+  ansible.builtin.command:
+    cmd: kubectl get deployment cert-manager -n {{ kserve_certmanager_namespace }}
+  changed_when: false
+
+# ── Knative mode checks ─────────────────────────────────────────────────────
+
+- name: "kserve | Check Istio (istiod)"
+  ansible.builtin.command:
+    cmd: kubectl get deployment istiod -n {{ kserve_istio_namespace }}
+  changed_when: false
+  when: kserve_deploy_mode == 'Knative'
+
+- name: "kserve | Check Knative Serving controller"
+  ansible.builtin.command:
+    cmd: kubectl get deployment controller -n {{ kserve_knative_namespace }}
+  changed_when: false
+  when: kserve_deploy_mode == 'Knative'
+
+# ── LLMIsvc add-on checks ───────────────────────────────────────────────────
+
+- name: "kserve | Check LLMInferenceService CRD"
+  ansible.builtin.command:
+    cmd: kubectl get crd llminferenceservices.serving.kserve.io
+  changed_when: false
+  when: kserve_llmisvc_enabled | bool
+
+- name: "kserve | Check LLMIsvc controller"
+  ansible.builtin.command:
+    cmd: "kubectl get deployment llmisvc-controller-manager -n {{ kserve_namespace }}"
+  changed_when: false
+  when: kserve_llmisvc_enabled | bool
+
+- name: "kserve | Check LWS operator"
+  ansible.builtin.command:
+    cmd: kubectl get deployment lws-controller-manager -n {{ kserve_lws_namespace }}
+  changed_when: false
+  when: kserve_llmisvc_enabled | bool
+
+# ── Helm release checks ─────────────────────────────────────────────────────
+
+- name: "kserve | Check Helm releases"
+  ansible.builtin.command:
+    cmd: "helm list -n {{ kserve_namespace }} --short"
+  changed_when: false
+  register: _kserve_helm_list
+
+- name: "kserve | Display Helm releases"
+  ansible.builtin.debug:
+    msg: "KServe Helm releases: {{ _kserve_helm_list.stdout_lines }}"
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+
+- name: "kserve | Validation passed"
+  ansible.builtin.debug:
+    msg: >-
+      KServe validation passed
+      (mode: {{ kserve_deploy_mode }}){{ kserve_llmisvc_enabled | bool | ternary(' + LLMIsvc', '') }}.

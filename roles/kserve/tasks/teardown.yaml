@@ -1,0 +1,215 @@
+---
+# =============================================================================
+# KServe v0.17+ teardown — handles Standard, Knative & LLMIsvc add-on
+# =============================================================================
+
+# ── LLMIsvc add-on (if enabled) ─────────────────────────────────────────────
+
+- name: "kserve | Uninstall LLMIsvc resources"
+  kubernetes.core.helm:
+    name: kserve-llmisvc-resources
+    release_namespace: "{{ kserve_namespace }}"
+    state: absent
+    wait: true
+  failed_when: false
+  when: kserve_llmisvc_enabled | bool
+
+- name: "kserve | Uninstall LLMIsvc CRDs Helm release"
+  kubernetes.core.helm:
+    name: kserve-llmisvc-crd
+    release_namespace: "{{ kserve_namespace }}"
+    state: absent
+    wait: true
+  failed_when: false
+  when: kserve_llmisvc_enabled | bool
+
+- name: "kserve | Find LLMIsvc CRDs"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+  register: _llmisvc_crds
+  failed_when: false
+  when: kserve_llmisvc_enabled | bool
+
+- name: "kserve | Delete LLMIsvc CRDs"
+  kubernetes.core.k8s:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "{{ item.metadata.name }}"
+    state: absent
+  loop: "{{ _llmisvc_crds.resources | default([]) | selectattr('metadata.name', 'match', '.*(llminferenceservice|llmserverpool).*') | list }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  failed_when: false
+  when: kserve_llmisvc_enabled | bool
+
+# NOTE: GIE CRDs are owned by the kserve-llmisvc Helm charts.
+
+- name: "kserve | Uninstall LWS operator"
+  kubernetes.core.helm:
+    name: lws
+    release_namespace: "{{ kserve_lws_namespace }}"
+    state: absent
+    wait: true
+  failed_when: false
+  when: kserve_llmisvc_enabled | bool
+
+- name: "kserve | Delete LWS CRDs"
+  kubernetes.core.k8s:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: leaderworkersets.leaderworkerset.x-k8s.io
+    state: absent
+  failed_when: false
+  when: kserve_llmisvc_enabled | bool
+
+- name: "kserve | Delete LWS namespace"
+  kubernetes.core.k8s:
+    kind: Namespace
+    name: "{{ kserve_lws_namespace }}"
+    state: absent
+  failed_when: false
+  when: kserve_llmisvc_enabled | bool
+
+# ── KServe core (all modes) ─────────────────────────────────────────────────
+
+- name: "kserve | Uninstall KServe runtime configs"
+  kubernetes.core.helm:
+    name: kserve-runtime-configs
+    release_namespace: "{{ kserve_namespace }}"
+    state: absent
+    wait: true
+  failed_when: false
+
+- name: "kserve | Uninstall KServe resources"
+  kubernetes.core.helm:
+    name: kserve-resources
+    release_namespace: "{{ kserve_namespace }}"
+    state: absent
+    wait: true
+  failed_when: false
+
+- name: "kserve | Uninstall KServe CRDs Helm release"
+  kubernetes.core.helm:
+    name: kserve-crd
+    release_namespace: "{{ kserve_namespace }}"
+    state: absent
+    wait: true
+  failed_when: false
+
+- name: "kserve | Find KServe CRDs"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+  register: _kserve_crds
+  failed_when: false
+
+- name: "kserve | Delete KServe CRDs"
+  kubernetes.core.k8s:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "{{ item.metadata.name }}"
+    state: absent
+  loop: "{{ _kserve_crds.resources | default([]) | selectattr('metadata.name', 'match', '.*(kserve|serving\\.kubeflow).*') | list }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  failed_when: false
+
+- name: "kserve | Delete KServe webhooks"
+  kubernetes.core.k8s:
+    api_version: admissionregistration.k8s.io/v1
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+    state: absent
+  loop:
+    - { kind: MutatingWebhookConfiguration, name: "inferenceservice.serving.kserve.io" }
+    - { kind: ValidatingWebhookConfiguration, name: "inferenceservice.serving.kserve.io" }
+    - { kind: ValidatingWebhookConfiguration, name: "trainedmodel.serving.kserve.io" }
+  failed_when: false
+
+- name: "kserve | Delete KServe namespace"
+  kubernetes.core.k8s:
+    kind: Namespace
+    name: "{{ kserve_namespace }}"
+    state: absent
+  failed_when: false
+
+# ── Knative mode teardown ────────────────────────────────────────────────────
+
+- name: "kserve | Uninstall Knative net-istio"
+  kubernetes.core.k8s:
+    src: "https://github.com/knative/net-istio/releases/download/knative-v{{ kserve_knative_version }}/net-istio.yaml"
+    state: absent
+  failed_when: false
+  when: kserve_deploy_mode == 'Knative'
+
+- name: "kserve | Uninstall Knative Serving core"
+  kubernetes.core.k8s:
+    src: "https://github.com/knative/serving/releases/download/knative-v{{ kserve_knative_version }}/serving-core.yaml"
+    state: absent
+  failed_when: false
+  when: kserve_deploy_mode == 'Knative'
+
+- name: "kserve | Uninstall Knative Serving CRDs"
+  kubernetes.core.k8s:
+    src: "https://github.com/knative/serving/releases/download/knative-v{{ kserve_knative_version }}/serving-crds.yaml"
+    state: absent
+  failed_when: false
+  when: kserve_deploy_mode == 'Knative'
+
+- name: "kserve | Delete Knative namespace"
+  kubernetes.core.k8s:
+    kind: Namespace
+    name: "{{ kserve_knative_namespace }}"
+    state: absent
+  failed_when: false
+  when: kserve_deploy_mode == 'Knative'
+
+- name: "kserve | Uninstall Istio (istiod)"
+  kubernetes.core.helm:
+    name: istiod
+    release_namespace: "{{ kserve_istio_namespace }}"
+    state: absent
+    wait: true
+  failed_when: false
+  when: kserve_deploy_mode == 'Knative'
+
+- name: "kserve | Uninstall Istio (base)"
+  kubernetes.core.helm:
+    name: istio-base
+    release_namespace: "{{ kserve_istio_namespace }}"
+    state: absent
+    wait: true
+  failed_when: false
+  when: kserve_deploy_mode == 'Knative'
+
+- name: "kserve | Find Istio CRDs"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+  register: _istio_crds
+  failed_when: false
+  when: kserve_deploy_mode == 'Knative'
+
+- name: "kserve | Delete Istio CRDs"
+  kubernetes.core.k8s:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "{{ item.metadata.name }}"
+    state: absent
+  loop: "{{ _istio_crds.resources | default([]) | selectattr('metadata.name', 'match', '.*istio\\.io') | list }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  failed_when: false
+  when: kserve_deploy_mode == 'Knative'
+
+- name: "kserve | Delete Istio namespace"
+  kubernetes.core.k8s:
+    kind: Namespace
+    name: "{{ kserve_istio_namespace }}"
+    state: absent
+  failed_when: false
+  when: kserve_deploy_mode == 'Knative'
+
+# NOTE: cert-manager teardown is handled by the cert_manager role (platform layer).
+# Do not delete cert-manager resources here — other components depend on it.

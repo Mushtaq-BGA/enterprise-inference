@@ -1,0 +1,6 @@
+---
+galaxy_info:
+  role_name: langfuse
+  description: Langfuse — open-source LLM observability platform (traces, costs, evals)
+  min_ansible_version: "2.15"
+dependencies: []

@@ -1,0 +1,21 @@
+# =============================================================================
+# vLLM runtime — low-level plumbing (CPU)
+# =============================================================================
+# The deploy config that users tune — versions, common env, per-category args
+# and resource defaults — lives in models.yaml → runtimes.vllm (so the full
+# picture is in one place). This file holds only the stable, low-level plumbing
+# that is merged in at load time (models.yaml wins on any key clash).
+#
+# Supported plumbing keys:
+#   device                   cpu | gpu                                (default: cpu)
+#   kind                     LLMInferenceService | InferenceService   (default: LLMInferenceService)
+#   routing                  epp | direct
+#   format                   model format hint                        (OVMS only)
+#   runtime_name             ClusterServingRuntime name to reference  (OVMS only)
+#   model_downloader_image   image for the weight-download job        (OVMS only)
+#   serving_runtime_manifest path to a raw CR manifest to apply       (OVMS only)
+# =============================================================================
+
+device: cpu
+kind: LLMInferenceService
+routing: epp

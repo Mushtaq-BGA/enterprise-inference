@@ -1,0 +1,93 @@
+---
+# =============================================================================
+# Inference Configuration — enterprise.ai-inference
+# =============================================================================
+# Role defaults live in roles/<name>/defaults/main.yaml.
+# Override any of them here.  This file is loaded by the core installer
+# via:  -e @ext/enterprise.ai-inference/config.yaml
+# =============================================================================
+
+# --- Keycloak (realm & client owned by this solution) ---
+keycloak_realm: "inference"
+keycloak_client_id: "inference-client"
+# keycloak_token_lifespan: 900  # JWT access token lifespan in seconds (default: 15 min)
+
+# --- AI Gateway ---
+# Which in-cluster AI gateway sits behind the edge (eg-gateway) and dispatches
+# to the KServe model backends. Both speak the OpenAI protocol on the same
+# unified URL and route to InferencePool/Service backends — only the data plane
+# and CRDs differ.
+#   envoy        — Envoy AI Gateway (AIGatewayRoute CRDs, EPP endpoint picker)
+#   agentgateway — agentgateway (native Gateway API HTTPRoute → InferencePool,
+#                  plus MCP / A2A support for the agentic layer)
+ai_gateway_provider: "envoy"              # envoy | agentgateway
+
+# --- Envoy AI Gateway (used when ai_gateway_provider=envoy) ---
+envoy_ai_gateway_version: "0.6.0"
+envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
+# inference_hostname: "inference.{{ base_domain_name }}"  # defaults to inference.<base_domain_name>
+# inference_prefix: "inference"                           # prefix prepended to base_domain_name if inference_hostname not set
+
+# --- agentgateway (used when ai_gateway_provider=agentgateway) ---
+# agentgateway_version: "1.3.1"
+# agentgateway_namespace: "agentgateway-system"
+
+# --- KServe ---
+# kserve_version: "0.15.1"
+# kserve_deploy_mode: "Standard"         # Standard | Knative
+# kserve_namespace: "kserve"
+# kserve_llmisvc_epp_image: "ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0"
+# kserve_llmisvc_tokenizer_image: "ghcr.io/llm-d/llm-d-uds-tokenizer:vllm-v0.19.1"
+
+# --- LiteLLM ---
+# litellm_version: "v1.83.14-stable.patch.2"
+# litellm_namespace: "litellm"
+# litellm_hostname: "litellm.inference-example.com"  # defaults to litellm.<base_domain_name>
+# litellm_cache_enabled: true
+# litellm_cache_ttl: 600
+
+# --- Langfuse ---
+# langfuse_enabled: false       # auto-enabled when auth_provider=litellm
+# langfuse_namespace: "langfuse"
+# langfuse_hostname: "langfuse.inference-example.com"  # defaults to langfuse.<base_domain_name>
+# langfuse_admin_email: "admin@inference-example.com"  # defaults to admin@<base_domain_name>
+# langfuse_admin_password: set via LANGFUSE_ADMIN_PASSWORD env var
+
+# --- CPU Policy ---
+# Single switch controlling all CPU-pinning infrastructure.
+# All dependent settings (NRI install, kubelet flags, model annotations) are
+# auto-derived from this value.
+#   nri-balloons    (default) NRI balloons resource policy — NUMA-aware pinning
+#   kubelet-static  kubelet static CPU manager (Guaranteed QoS pinning)
+#   best-effort     no pinning, standard scheduler
+#
+# This must match the value the cluster was installed with: it decides both how
+# kubelet is configured (solutions repo) and how model manifests are rendered
+# (this repo). Changing it on an existing cluster requires re-running
+# `./es_auto_installer.sh install kubernetes` so kubelet is reconfigured.
+kubernetes_cpu_policy: "nri-balloons"
+
+# NRI Balloons tuning (only when kubernetes_cpu_policy=nri-balloons):
+# nri_reserved_cpu_list: ""              # Linux cpuset for system CPUs (auto-sized if empty)
+# nri_deployment_profile: "standard"     # minimal(8) | standard(12) | observability(16) | full(20)
+
+# kubelet-static tuning (only when kubernetes_cpu_policy=kubelet-static):
+# Model pods are rendered as Guaranteed QoS (integer cpu, requests == limits) so
+# kubelet's static CPU manager grants them exclusive whole cores. With
+# full-pcpus-only enabled (the solutions default) a pod's cpu request must be a
+# multiple of the SMT width, or kubelet rejects it with SMTAlignmentError;
+# model-manager rounds cpu up to satisfy this. On an SMT-disabled cluster set:
+# mm_kubelet_threads_per_core: 1         # exported as MM_KUBELET_THREADS_PER_CORE
+
+# --- LLM Services ---
+# llm_services_namespace: "llm-inference"
+
+# Deploy models during installation (true/false)
+# Set to false to install infrastructure only without deploying any models
+# Can be overridden with: ./es_auto_installer.sh install inference --skip-models
+llm_services_deploy_models: false
+
+# Optional: Customize model deployment behavior
+# model_deploy_flags: ""                    # Additional flags for deploy-default-models.sh
+# model_deploy_flags: "--skip-download"     # Fast for testing (assume weights on PVC)
+# model_deploy_flags: "--no-wait"           # Don't wait for models to become Ready

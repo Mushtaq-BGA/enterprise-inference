@@ -1,0 +1,81 @@
+---
+# =============================================================================
+# Langfuse Role Defaults
+# =============================================================================
+# Langfuse is an open-source LLM observability platform.
+# It captures traces, costs, latency and quality metrics for every LLM call
+# routed through LiteLLM.
+#
+# Architecture:
+#   LiteLLM → Langfuse (OTEL/HTTP callback) → PostgreSQL + Redis + MinIO(S3)
+#
+# We reuse the existing PostgreSQL and MinIO from the platform layer.
+# A lightweight Redis (Valkey) is deployed inside the Langfuse namespace.
+#
+# Single-node:  1 replica each, minimal resources
+# Multi-node:   2 replicas for web+worker, HPA enabled
+# =============================================================================
+
+langfuse_version: "1.5.33"              # chart version (appVersion: 3.177.0)
+gateway_create: "{{ envoy_gateway_enabled | default(false) }}"
+langfuse_namespace: "langfuse"
+langfuse_helm_repo: "https://langfuse.github.io/langfuse-k8s"
+langfuse_helm_repo_name: "langfuse"
+langfuse_helm_chart: "langfuse/langfuse"
+
+# Hostname for the Langfuse UI (overridable in global_config.yaml)
+langfuse_hostname: "langfuse.{{ base_domain_name | default('inference-example.com') }}"
+
+# Default admin account — seeded on first startup via LANGFUSE_INIT_* env vars
+# Email defaults to admin@<base_domain_name>
+# Password: set via langfuse_admin_password before install, or auto-generated
+langfuse_admin_email: "admin@{{ base_domain_name | default('inference-example.com') }}"
+langfuse_admin_password: "{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
+
+# PostgreSQL — reuse platform PostgreSQL
+langfuse_db_name: "langfuse"
+langfuse_db_user: "langfuse"
+
+# MinIO — reuse platform MinIO for blob storage (traces, media)
+langfuse_s3_bucket: "langfuse"
+minio_namespace: "minio"
+
+
+# ClickHouse — deployed by Helm subchart (bitnami/clickhouse)
+langfuse_clickhouse_storage_size: "50Gi"
+
+# Single-node defaults (kubernetes_nodes | length <= 1)
+langfuse_single_node_replicas: 1
+langfuse_single_node_resources:
+  web:
+    requests:
+      cpu: "2"
+      memory: "2Gi"
+    limits:
+      cpu: "4"
+      memory: "4Gi"
+  worker:
+    requests:
+      cpu: "2"
+      memory: "2Gi"
+    limits:
+      cpu: "4"
+      memory: "4Gi"
+
+# Multi-node defaults (kubernetes_nodes | length > 1)
+langfuse_multi_node_replicas: 2
+langfuse_multi_node_resources:
+  web:
+    requests:
+      cpu: "2"
+      memory: "2Gi"
+    limits:
+      cpu: "4"
+      memory: "4Gi"
+  worker:
+    requests:
+      cpu: "2"
+      memory: "2Gi"
+    limits:
+      cpu: "4"
+      memory: "4Gi"
