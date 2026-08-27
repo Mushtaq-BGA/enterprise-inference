@@ -7,7 +7,7 @@
 [![Runtimes: vLLM · OVMS](https://img.shields.io/badge/Runtimes-vLLM%20%C2%B7%20OVMS-purple)](https://vllm.ai)
 [![API: OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-green)](https://platform.openai.com/docs/api-reference)
 
-**The inference layer for Intel® Enterprise for AI Solutions. Serve any Hugging Face model on Intel® Xeon® CPUs with one command.**
+**The inference layer for Intel® AI for Enterprise Solutions. Serve any Hugging Face model on Intel® Xeon® CPUs with one command.**
 
 > Provides the Ansible roles that stand up the model-serving stack — KServe, runtimes, AI gateway, LiteLLM, Langfuse — and **`model-manager`**, a CLI that takes a model from Hugging Face to a live OpenAI-compatible endpoint with NUMA-aware CPU pinning.
 
@@ -51,13 +51,13 @@ An inference request enters through the **LLM gateway**, which authenticates and
 
 > [!NOTE]
 > **Prerequisite:** this layer is not standalone. `es_auto_installer.sh` is the installer
-> from the [**Intel® Enterprise for AI Solutions**](https://github.com/intel/enterprise-ai-solutions)
+> from the [**Intel® AI for Enterprise Solutions**](https://github.com/intel/enterprise-ai-solutions)
 > repo, which clones this repository into `ext/enterprise.ai-inference/`. Clone that repo, prep the
 > machine, and create an environment, then run every command below from its root:
 >
 > ```bash
 > git clone https://github.com/intel/enterprise-ai-solutions.git
-> cd applications.ai.enterprise.ai-solutions
+> cd enterprise-ai-solutions
 > ./es_auto_installer.sh configure && ./es_auto_installer.sh init local
 > ```
 >
@@ -160,7 +160,7 @@ Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses
 
 - [Documentation Index](docs/README.md)
 - [GitHub Repository](https://github.com/intel/enterprise-inference)
-- [Intel® Enterprise for AI Solutions (core platform)](https://github.com/intel/enterprise-ai-solutions)
+- [Intel® AI for Enterprise Solutions (core platform)](https://github.com/intel/enterprise-ai-solutions)
 - [Architecture](docs/reference/architecture.md)
 - [Inference Request Flow](docs/reference/request_flow.md)
 
