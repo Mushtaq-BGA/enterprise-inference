@@ -1,4 +1,4 @@
-# Intel® Enterprise for AI Inference
+# Intel® AI for Enterprise Inference
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Component of: AI Solutions](https://img.shields.io/badge/Component%20of-AI%20Solutions-0068B5)](https://github.com/intel/enterprise-ai-solutions)
@@ -21,7 +21,7 @@
 
 ---
 
-## What is Intel® Enterprise for AI Inference?
+## What is Intel® AI for Enterprise Inference?
 
 Serving a model on Kubernetes normally means hand-writing manifests, sizing CPU and memory, pinning cores to the right NUMA node, downloading weights into shared storage, and wiring a route through a gateway — for every model.
 
@@ -38,7 +38,7 @@ The result is a single OpenAI-compatible endpoint. The `model` field in the requ
 An inference request enters through the **LLM gateway**, which authenticates and authorizes it, then routes it to a serving engine — **vLLM** or **OpenVINO™ Model Server** — and returns an OpenAI-compatible response. The gateway also provides model endpoints, user and key management, token telemetry, and monitoring. It all runs on a Kubernetes-orchestrated, Helm-packaged stack over Intel® Xeon® infrastructure.
 
 <p align="center">
-  <img src="docs/assets/architecture.png" alt="Intel Enterprise for AI Inference architecture: an inference request and response enter at the top through API applications and services (samples, API apps and functions) over OpenAI-compatible API endpoints; below sits the LLM gateway providing authentication and authorization, model endpoints, user and key management, token telemetry, and monitoring; beneath it the inferencing engines vLLM and OpenVINO Model Server; then the orchestration layer with a Kubernetes orchestrator and Helm charts; and at the base the infrastructure core components — operating system (Ubuntu 22.04/24.04, RHEL) and Xeon software operators and drivers — running on Intel Xeon" />
+  <img src="docs/assets/architecture.png" alt="Intel AI for Enterprise Inference architecture: an inference request and response enter at the top through API applications and services (samples, API apps and functions) over OpenAI-compatible API endpoints; below sits the LLM gateway providing authentication and authorization, model endpoints, user and key management, token telemetry, and monitoring; beneath it the inferencing engines vLLM and OpenVINO Model Server; then the orchestration layer with a Kubernetes orchestrator and Helm charts; and at the base the infrastructure core components — operating system (Ubuntu 22.04/24.04, RHEL) and Xeon software operators and drivers — running on Intel Xeon" />
 </p>
 
 > Under the hood there are two gateways: the edge gateway terminates TLS and authenticates, while the in-cluster AI gateway routes to the model the request body names. See the [Architecture deep-dive](docs/reference/architecture.md) and [Inference Request Flow](docs/reference/request_flow.md) for the full component list and execution flow.
