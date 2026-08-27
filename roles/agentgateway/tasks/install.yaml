@@ -1,0 +1,305 @@
+---
+# Copyright (C) 2025-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# agentgateway — Install / Upgrade CRDs + Control Plane via Helm (OCI)
+# =============================================================================
+# Mirrors the envoy_ai_gateway role's shape so the two providers are drop-in
+# interchangeable. Creates the public "ai-gateway" Gateway (GatewayClass
+# agentgateway) in llm-inference and the eg-gateway → ai-gateway bridge route.
+# =============================================================================
+
+# ── 1. Gateway API CRDs (standard channel) ───────────────────────────────────
+# agentgateway relies on the upstream Gateway API CRDs. envoy_gateway also
+# installs these; applying server-side is idempotent and keeps the version
+# pinned when agentgateway is the sole gateway on a BYO cluster.
+- name: "agentgateway | Install Gateway API standard CRDs (server-side)"
+  ansible.builtin.command:
+    cmd: >-
+      kubectl apply --server-side --force-conflicts
+      -f {{ agentgateway_gateway_api_manifest }}
+  register: _agw_gwapi
+  changed_when: "'configured' in _agw_gwapi.stdout or 'created' in _agw_gwapi.stdout"
+
+# ── 2. Control-plane namespace + mesh/PSS labels ─────────────────────────────
+- name: "agentgateway | Ensure control-plane namespace"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ agentgateway_namespace }}"
+
+- name: "agentgateway | Label control-plane namespace — Istio ambient"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ agentgateway_namespace }}"
+        labels:
+          istio.io/dataplane-mode: "ambient"
+  when: istio_enabled | default(false) | bool
+
+- name: "agentgateway | Label control-plane namespace — PSS"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ agentgateway_namespace }}"
+        labels:
+          pod-security.kubernetes.io/enforce: "privileged"
+          pod-security.kubernetes.io/audit: "privileged"
+          pod-security.kubernetes.io/warn: "privileged"
+  when: enforce_pss | default(false) | bool
+
+# ── 3. Detect existing release for upgrade messaging ─────────────────────────
+- name: "agentgateway | Check for existing Helm release"
+  kubernetes.core.helm_info:
+    name: agentgateway
+    release_namespace: "{{ agentgateway_namespace }}"
+  register: _agw_release
+  failed_when: false
+
+- name: "agentgateway | Detect version"
+  ansible.builtin.set_fact:
+    _agw_installed_chart: "{{ _agw_release.status.chart | default('') }}"
+    _agw_target_chart: "agentgateway-v{{ agentgateway_version }}"
+
+- name: "agentgateway | Status"
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Upgrading' if _agw_installed_chart and _agw_installed_chart != _agw_target_chart
+         else ('Already at v' ~ agentgateway_version ~ ' — reconciling') if _agw_installed_chart
+         else 'Fresh install' }}
+      agentgateway v{{ agentgateway_version }}
+      {{ ('(from ' ~ _agw_installed_chart ~ ')') if _agw_installed_chart and _agw_installed_chart != _agw_target_chart else '' }}
+
+# ── 4. Install/upgrade CRDs + control plane ──────────────────────────────────
+- name: "agentgateway | Install/upgrade CRDs via Helm (OCI)"
+  when: >-
+    _agw_release.status is not defined or
+    _agw_release.status is none or
+    _agw_installed_chart != _agw_target_chart
+  kubernetes.core.helm:
+    name: agentgateway-crds
+    chart_ref: "{{ agentgateway_helm_repo }}/agentgateway-crds"
+    release_namespace: "{{ agentgateway_namespace }}"
+    create_namespace: true
+    chart_version: "v{{ agentgateway_version }}"
+    wait: true
+    timeout: "5m0s"
+
+- name: "agentgateway | Install/upgrade control plane via Helm (OCI)"
+  kubernetes.core.helm:
+    name: agentgateway
+    chart_ref: "{{ agentgateway_helm_repo }}/agentgateway"
+    release_namespace: "{{ agentgateway_namespace }}"
+    chart_version: "v{{ agentgateway_version }}"
+    values:
+      controller:
+        affinity: "{{ _platform_affinity | default({}) }}"
+      # Turns on InferencePool reconciliation + EPP dispatch and the RBAC on
+      # inference.networking.k8s.io the controller needs for epp-routed models.
+      inferenceExtension:
+        enabled: "{{ agentgateway_inference_extension_enabled | bool }}"
+    wait: true
+    timeout: "5m0s"
+
+- name: "agentgateway | Wait for controller deployment"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ agentgateway_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/name=agentgateway"
+  register: _agw_deploy
+  until:
+    - _agw_deploy.resources | length > 0
+    - _agw_deploy.resources[0].status.conditions | default([]) | selectattr('type','eq','Available') | selectattr('status','eq','True') | list | length > 0
+  retries: 60
+  delay: 5
+
+- name: "agentgateway | Control plane ready"
+  ansible.builtin.debug:
+    msg: "agentgateway v{{ agentgateway_version }} ready in {{ agentgateway_namespace }}."
+
+# ── 5. Public AI Gateway (GatewayClass agentgateway) ─────────────────────────
+- name: "agentgateway | Ensure AI Gateway namespace"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ai_gateway_namespace }}"
+  when: ai_gateway_create | bool
+
+- name: "agentgateway | Label AI Gateway namespace — Istio ambient"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ai_gateway_namespace }}"
+        labels:
+          istio.io/dataplane-mode: "ambient"
+  when:
+    - ai_gateway_create | bool
+    - istio_enabled | default(false) | bool
+
+- name: "agentgateway | Create GatewayClass"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: GatewayClass
+      metadata:
+        name: "{{ ai_gateway_class_name }}"
+      spec:
+        controllerName: agentgateway.dev/agentgateway
+  when: ai_gateway_create | bool
+
+- name: "agentgateway | Create AI Gateway resource"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata:
+        name: "{{ ai_gateway_name }}"
+        namespace: "{{ ai_gateway_namespace }}"
+      spec:
+        gatewayClassName: "{{ ai_gateway_class_name }}"
+        listeners:
+          - name: http
+            protocol: HTTP
+            port: 80
+            allowedRoutes:
+              namespaces:
+                from: All
+  when: ai_gateway_create | bool
+
+- name: "agentgateway | Wait for AI Gateway to be accepted"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ ai_gateway_name }}"
+    namespace: "{{ ai_gateway_namespace }}"
+  register: _agw_gw_status
+  until:
+    - _agw_gw_status.resources | length > 0
+    - _agw_gw_status.resources[0].status.conditions | default([]) | selectattr('type','eq','Accepted') | selectattr('status','eq','True') | list | length > 0
+  retries: 60
+  delay: 5
+  when: ai_gateway_create | bool
+
+# ── 6. Model-dispatch policy: extract "model" from body → header ─────────────
+# agentgateway routes on the X-Gateway-Base-Model-Name header; per-model
+# HTTPRoutes (created by model-manager) match on it. A PreRouting transformation
+# copies the OpenAI request body "model" field into that header, so the
+# per-model routes can match before a backend is chosen.
+- name: "agentgateway | Create model-header extraction policy"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: agentgateway.dev/v1alpha1
+      kind: AgentgatewayPolicy
+      metadata:
+        name: extract-model-header
+        namespace: "{{ ai_gateway_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: agentgateway-role
+      spec:
+        targetRefs:
+          - group: gateway.networking.k8s.io
+            kind: Gateway
+            name: "{{ ai_gateway_name }}"
+        traffic:
+          # PreRouting: run the transformation BEFORE route matching, so the
+          # header it sets is available for the per-model HTTPRoute header match.
+          # (phase lives at traffic.phase, NOT under transformation.request.)
+          phase: PreRouting
+          transformation:
+            request:
+              set:
+                - name: X-Gateway-Base-Model-Name
+                  value: 'string(json(request.body).model)'
+  when: ai_gateway_create | bool
+
+# ── 7. External ingress: eg-gateway → ai-gateway HTTPRoute ───────────────────
+# Bridge the edge eg-gateway to the AI gateway, forwarding all inference.<domain>
+# traffic to the ai-gateway data-plane Service.
+#
+# NOTE — namespace difference vs. envoy_ai_gateway: Envoy Gateway places its
+# data-plane proxy Service in the CONTROLLER namespace (envoy-gateway-system),
+# so its bridge backendRef is same-namespace. agentgateway instead creates the
+# data-plane Service in the GATEWAY's namespace (ai_gateway_namespace, i.e.
+# llm-inference). So this backendRef is cross-namespace and requires a
+# ReferenceGrant in the target namespace permitting the edge namespace's
+# HTTPRoutes to reference the Service (Gateway API blocks cross-ns refs by default).
+- name: "agentgateway | Create external inference HTTPRoute (eg-gateway → ai-gateway)"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: inference-external
+        namespace: "{{ envoy_gateway_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: agentgateway-role
+      spec:
+        hostnames:
+          - "{{ inference_hostname }}"
+        parentRefs:
+          - name: "{{ envoy_gateway_name }}"
+            namespace: "{{ envoy_gateway_namespace }}"
+            sectionName: https
+        rules:
+          - matches:
+              - path:
+                  type: PathPrefix
+                  value: /
+            backendRefs:
+              - name: "{{ ai_gateway_service_name }}"
+                namespace: "{{ ai_gateway_namespace }}"
+                port: 80
+  when: ai_gateway_create | bool
+
+# Allow the edge HTTPRoute (in envoy_gateway_namespace) to target the ai-gateway
+# Service in ai_gateway_namespace. Without this, the ref is silently rejected and
+# the edge returns HTTP 500 (direct_response, no upstream cluster).
+- name: "agentgateway | Allow edge → ai-gateway cross-namespace Service ref (ReferenceGrant)"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1beta1
+      kind: ReferenceGrant
+      metadata:
+        name: eg-to-ai-gateway
+        namespace: "{{ ai_gateway_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: agentgateway-role
+      spec:
+        from:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+            namespace: "{{ envoy_gateway_namespace }}"
+        to:
+          - group: ""
+            kind: Service
+            name: "{{ ai_gateway_service_name }}"
+  when: ai_gateway_create | bool
+
+- name: "agentgateway | Install/upgrade complete"
+  ansible.builtin.debug:
+    msg: >-
+      agentgateway ready — public Gateway '{{ ai_gateway_name }}'
+      (class {{ ai_gateway_class_name }}) in {{ ai_gateway_namespace }},
+      bridged from {{ envoy_gateway_name }} at host {{ inference_hostname }}.

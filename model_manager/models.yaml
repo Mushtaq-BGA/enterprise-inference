@@ -1,0 +1,209 @@
+# =============================================================================
+# Model Manager — model catalog & runtime configuration
+# =============================================================================
+#   models:    what to deploy (one entry per model)
+#   runtimes:  per-engine deploy config (images, versions, env, categories)
+#
+#   ./model-manager deploy <name> --wait           # deploy a catalog model
+#   ./model-manager deploy --id <hf/repo> --cpu 8  # deploy any HuggingFace model by id (no edit needed)
+#   ./model-manager undeploy <name>
+# =============================================================================
+
+
+# =============================================================================
+# Defaults — cluster-wide fallbacks applied to every model that omits a value
+# =============================================================================
+defaults:
+  namespace: llm-inference        # target namespace for deployments
+  runtime: vllm                   # default engine when a model omits one
+  replicas: 1                     # default replica count
+  require_amx: true               # only schedule model pods on nodes with Intel AMX
+
+# =============================================================================
+# Storage — where downloaded model weights live
+# =============================================================================
+storage:
+  pvc_name: model-store           # PVC that holds downloaded model weights
+
+# =============================================================================
+# Network — proxy + connectivity settings for pulling weights from HuggingFace
+# =============================================================================
+network:
+  http_proxy: ""                  # e.g. http://proxy:911 — empty inherits from env
+  https_proxy: ""                 # e.g. http://proxy:912
+  no_proxy: ""                    # e.g. localhost,127.0.0.1,10.0.0.0/8
+  connectivity_check: https://huggingface.co   # reachability probe before download
+
+
+# =============================================================================
+# Models — what to deploy (one entry per model)
+# =============================================================================
+# Required: name, model_id. Everything else is optional and inherits from the
+# runtime/category. CLI flags override any field for a one-off deploy.
+#
+# Common fields:
+#   category:        llm | embed | rerank | vlm   (drives default args + cpu/memory)
+#   cpu / memory:    resource requests            (default from category)
+#   replicas:        replica count                (default: 1)
+#   namespace:       target namespace             (default: llm-inference)
+#   node:            pin to a specific node
+#   routing:         epp | direct
+#   image:           override the runtime image entirely
+#   autodeploy:      true → bring up automatically during install
+#   chat_template:   inline Jinja, or an absolute path → vLLM --chat-template
+#                    Inline Jinja (multi-line: use a `|` block scalar) is stored
+#                    in a <model>-chat-template ConfigMap and mounted read-only
+#                    at /etc/chat-template — it is deliberately NOT inlined into
+#                    the LLMInferenceService, because the KServe controller runs
+#                    the spec through Go text/template and rejects `{{ ... }}`.
+#                    The ConfigMap is created on deploy and removed on undeploy.
+#                    An absolute path (leading /) is passed through untouched and
+#                    must already exist in the pod — e.g. a file you placed on the
+#                    model PVC, visible at /mnt/models/<file>. vLLM exits if it is
+#                    missing, so prefer inline Jinja unless the file is external.
+#                    Must be a single string — if a HF repo publishes a LIST of
+#                    named templates, copy just the one you want (usually
+#                    "default"). Literal CR (\r) survives: use a double-quoted
+#                    scalar with "\r" escapes (a `|` block scalar cannot carry CR,
+#                    as YAML normalizes line breaks).
+#   args: [ ... ]    extra engine args   (appended after category/version args)
+#   env:  { ... }    extra env vars      (merged over runtime env)
+#
+# Server binding — pick the model server + version. Two equivalent forms:
+#   servers: (preferred)   declares the known-good server/version allow-list
+#     servers: { vllm: { versions: ["0.24.0","0.19.1"], default: "0.24.0" } }
+#     default_server: vllm
+#   shorthand (single)     runtime: + server_version:   (no allow-list)
+#
+# Select at deploy: --server <engine> --server-version <v>   (must be declared)
+# Run variants side by side: --as <alt-name>
+
+models:
+
+  # LLM — small Qwen3, test model (servers: form)
+  - name: qwen3-0-6b                                                # deploy name + the "model" id used in API requests
+    model_id: Qwen/Qwen3-0.6B                                       # HuggingFace repo to pull weights from
+    category: llm                                                   # workload class → picks vLLM llm args + cpu/memory defaults
+    servers:                                                        # servers this model may run on (allow-list)
+      vllm: { versions: ["0.24.0", "0.19.1"], default: "0.24.0" }   # engine: allowed versions + default
+    default_server: vllm                                            # server used when --server is not passed
+    cpu: 8                                                          # CPU cores requested (overrides category default)
+    memory: 16Gi                                                    # memory requested (overrides category default)
+
+  # LLM — quantized Llama-3 8B, chat/completion (shorthand form)
+  - name: llama3-8b-awq
+    model_id: casperhansen/llama-3-8b-instruct-awq
+    category: llm
+    runtime: vllm
+    server_version: "0.24.0"
+    cpu: 16
+    memory: 32Gi
+
+  # LLM — Qwen3.5 2B INT4 on OpenVINO (flat runtime, no version)
+  - name: qwen3-5-2b-ovms
+    model_id: OpenVINO/Qwen3.5-2B-int4-ov
+    runtime: openvino
+    category: llm
+    cpu: 8
+    memory: 16Gi
+
+  # Embedding — BGE base English (768-dim)
+  - name: bge-base-en
+    model_id: BAAI/bge-base-en-v1.5
+    category: embed
+    runtime: vllm
+    server_version: "0.24.0"
+
+  # Reranker — BGE reranker for RAG pipelines
+  - name: bge-reranker
+    model_id: BAAI/bge-reranker-base
+    category: rerank
+    runtime: vllm
+    server_version: "0.24.0"
+
+
+# =============================================================================
+# Runtimes — per-engine deploy config (images, versions, env, categories)
+# =============================================================================
+# Per-engine deploy config, so the full picture of what a server runs with is in
+# one place. Low-level plumbing (device, kind, routing, CR manifest pointer)
+# lives in runtimes/<name>/values.yaml and is merged in at load.
+#
+# Effective config a pod receives (each layer overrides the one before it):
+#   env   = common env   + category env  + version env delta   + per-model env  + --env
+#   args  = category args + version args delta  + per-model args  + --arg
+#   image = the selected version's image
+#
+# Version selected by:  --server-version  >  model server_version:  >  default_version
+
+runtimes:
+
+  # ── vLLM (CPU) ──────────────────────────────────────────────────────────────
+  # env is shared across all versions/categories; args live per-category below.
+  vllm:
+    default_version: "0.24.0"       # used when a model/CLI doesn't pick a version
+
+    # Common env — applied to every vLLM pod. VLLM_CPU_KVCACHE_SPACE is NOT here:
+    # it is set per-category below (via ${KV_CACHE_GB} ← category kv_cache_gb) so
+    # embed/rerank can reserve a small KV cache and llm/vlm a larger one.
+    env:
+      USER: "vllm"
+      VLLM_CPU_NUM_OF_RESERVED_CPU: "1"
+      VLLM_CPU_SGL_KERNEL: "1"
+      VLLM_NO_USAGE_STATS: "1"
+      KMP_BLOCKTIME: "1"
+
+    # Server versions. Add a key, validate, then promote via default_version.
+    # Optional per-version env:/args: DELTAS layer on top of the common env
+    # above and the per-category args below.
+    versions:
+      "0.24.0":
+        image: "docker.io/vllm/vllm-openai-cpu:v0.24.0"
+      # Reference entry — copy, change key + image, tweak deltas. Deltas must suit
+      # the model: MoE-only flags (e.g. --enable-expert-parallel) crash dense models.
+      "0.19.1":
+        image: "docker.io/vllm/vllm-openai-cpu:v0.19.1"
+        env: { VLLM_USE_V1: "1", VLLM_CPU_KVCACHE_SPACE: "12" }
+        args: [ --max-num-seqs, "256" ]
+
+    # Per-category engine args + env + resource defaults (a model's own values
+    # override). VLLM_CPU_KVCACHE_SPACE is set here (not in the shared env above)
+    # so each workload class sizes its CPU KV cache appropriately —
+    # ${KV_CACHE_GB} is filled from this category's kv_cache_gb default.
+    categories:
+      llm:
+        args: [ --dtype, bfloat16, --max-num-seqs, "128", --max-num-batched-tokens, "2048", --enable-prefix-caching, --enable-chunked-prefill ]
+        env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
+        defaults: { cpu: 8, memory: "16Gi", kv_cache_gb: 8 }
+      # embed/rerank do no autoregressive generation, so they set no CPU KV
+      # cache — VLLM_CPU_KVCACHE_SPACE is intentionally omitted (vLLM uses its
+      # own default) and there is no kv_cache_gb to fill it.
+      embed:
+        args: [ --dtype, bfloat16, --gpu-memory-utilization, "0.7" ]
+        defaults: { cpu: 6, memory: "12Gi" }
+      rerank:
+        args: [ --dtype, bfloat16, --gpu-memory-utilization, "0.7" ]
+        defaults: { cpu: 6, memory: "12Gi" }
+      vlm:
+        args: [ --dtype, bfloat16, --max-num-seqs, "64", --max-num-batched-tokens, "1024" ]
+        env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
+        defaults: { cpu: 16, memory: "48Gi", kv_cache_gb: 8 }
+
+  # ── OpenVINO Model Server ─────────────────────────────────────────────────────
+  # Flat runtime (no version axis). image + plumbing live in
+  # runtimes/openvino/values.yaml.
+  #
+  # weight_format is a CONVERSION knob for `ovms --pull`: set it (e.g. int8, int4,
+  # fp16) ONLY when the model_id is a raw-HF repo that must be converted+quantized
+  # to OpenVINO IR. Leave it unset for models already published as OpenVINO IR
+  # (the OpenVINO/* repos below) — passing --weight-format to an already-converted
+  # model makes ovms --pull abort with "unsupported for OpenVINO models".
+  openvino:
+    env: {}
+    categories:
+      llm:
+        defaults: { cpu: 8, memory: "16Gi" }
+      embed:
+        defaults: { cpu: 6, memory: "12Gi" }
+      rerank:
+        defaults: { cpu: 6, memory: "12Gi" }

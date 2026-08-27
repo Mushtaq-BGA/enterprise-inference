@@ -1,0 +1,54 @@
+---
+# Copyright (C) 2025-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Ext Component Registry — enterprise.ai-inference
+# =============================================================================
+# Auto-discovered and merged into the core registry at preflight
+# (playbooks/includes/preflight.yaml). Rendered via lookup('template'), so the
+# Jinja in `enabled:` resolves before component resolution.
+#
+# All inference-layer components (except nri_cpu_balloons, which lives in the
+# solutions repo as it configures kubelet-level settings) are registered here.
+# =============================================================================
+
+components:
+  - name: nfd
+    layer: inference
+    enabled: "{{ nfd_enabled | default(true) | bool }}"
+    depends_on: []
+
+  - name: keycloak_config
+    layer: inference
+    enabled: "{{ keycloak_enabled | default(auth_provider | default('keycloak') != 'litellm') | bool }}"
+    depends_on: []
+
+  - name: envoy_ai_gateway
+    layer: inference
+    enabled: "{{ kserve_enabled | default(true) | bool and (ai_gateway_provider | default('envoy')) == 'envoy' }}"
+    depends_on: []
+
+  - name: agentgateway
+    layer: inference
+    enabled: "{{ (ai_gateway_provider | default('envoy')) == 'agentgateway' }}"
+    depends_on: []
+
+  - name: kserve
+    layer: inference
+    enabled: "{{ kserve_enabled | default(true) | bool }}"
+    depends_on: [envoy_ai_gateway, agentgateway]
+
+  - name: litellm
+    layer: inference
+    enabled: "{{ litellm_enabled | default(auth_provider | default('keycloak') == 'litellm') | bool }}"
+    depends_on: []
+
+  - name: langfuse
+    layer: inference
+    enabled: "{{ litellm_enabled | default(auth_provider | default('keycloak') == 'litellm') | bool }}"
+    depends_on: [litellm]
+
+  - name: llm_services
+    layer: inference
+    enabled: "{{ kserve_enabled | default(true) | bool }}"
+    depends_on: [kserve]

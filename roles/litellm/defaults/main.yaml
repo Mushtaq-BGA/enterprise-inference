@@ -1,0 +1,107 @@
+---
+# =============================================================================
+# LiteLLM Role Defaults
+# =============================================================================
+# LiteLLM is an OpenAI-compatible proxy that adds virtual key management,
+# spend tracking, rate limiting, and model routing on top of inference backends.
+#
+# When auth_provider=litellm:
+#   - Envoy Gateway uses LiteLLM's /key/verify as extAuth (replaces Keycloak JWT)
+#   - Keycloak is disabled (not deployed)
+#   - Virtual keys are the auth mechanism (Bearer <litellm-virtual-key>)
+#
+# LiteLLM sits in front of KServe inference endpoints:
+#   Client → Envoy Gateway (extAuth→LiteLLM) → LiteLLM proxy → KServe
+# =============================================================================
+
+litellm_version: "v1.83.14-stable.patch.2"     # Docker image tag to deploy
+litellm_namespace: "litellm"
+litellm_valkey_tag: "8.0-alpine"                # valkey/valkey (official upstream image, Alpine for smaller footprint)
+
+# Gateway integration
+gateway_create: "{{ envoy_gateway_enabled | default(false) }}"
+litellm_hostname: "litellm.{{ base_domain_name | default('inference-example.com') }}"
+
+# PostgreSQL — stores virtual keys, spend logs, team/org data
+litellm_db_name: "litellm"
+litellm_db_user: "litellm"
+
+# Master key — used by admin to create virtual keys
+# Set via LITELLM_MASTER_KEY env var or auto-generated at install
+litellm_master_key: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+
+# Salt for hashing stored keys (keep stable across restarts)
+litellm_salt_key: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+
+# LiteLLM UI
+litellm_ui_enabled: true
+
+# Model routing — models are managed via LiteLLM UI/API (store_model_in_db: true)
+# KServe gateway URL used when adding models via the UI
+litellm_kserve_gateway_url: "http://envoy-gateway.envoy-gateway-system.svc.cluster.local"
+litellm_kserve_namespace: "llm-inference"
+
+# Redis cache — reduces latency for repeated prompts
+litellm_cache_enabled: true
+litellm_cache_ttl: 600    # cache TTL in seconds (10 minutes)
+
+# Valkey (cache) resource limits
+litellm_redis_resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+
+# Single-node defaults (kubernetes_nodes | length <= 1)
+litellm_single_node_replicas: 1
+litellm_single_node_resources:
+  requests:
+    cpu: "1"
+    memory: "2Gi"
+  limits:
+    cpu: "4"
+    memory: "4Gi"
+
+# prisma query engine access under a hardened securityContext.
+# The engines are baked into the image under /root, which the uid 1000 the proxy
+# runs as cannot read, so they are seeded into this emptyDir by an initContainer
+# instead. See roles/litellm/files/prisma-engine-seed.sh for the full rationale.
+# The chart applies these to both the Deployment and the migration Job.
+litellm_prisma_root_size: "256Mi"
+litellm_prisma_root_volumes:
+  - name: prisma-root
+    emptyDir:
+      sizeLimit: "{{ litellm_prisma_root_size }}"
+litellm_prisma_root_volume_mounts:
+  - name: prisma-root
+    mountPath: /root
+
+# Schema migration Job — the chart's 512Mi limit is far too small and the Job was
+# cgroup-OOM-killed on every attempt until BackoffLimitExceeded (exit 137 reported
+# as "Error", with no log output at all because python's stdout was still buffered
+# when memory.oom.group killed the cgroup).
+# `python litellm/proxy/prisma_migration.py` imports the full litellm package and
+# shells out to the node prisma CLI; measured concurrent peak is ~2.1Gi
+# (python 930Mi + prisma 733Mi + node 185Mi + prisma-client-py 237Mi), so 2Gi OOMs
+# too. 4Gi matches the main container's ceiling, which runs the same migration
+# successfully. Requests stay small — the Job is short-lived (~90s).
+litellm_migration_job_resources:
+  requests:
+    cpu: "250m"
+    memory: "1Gi"
+  limits:
+    cpu: "1"
+    memory: "4Gi"
+
+# Multi-node defaults (kubernetes_nodes | length > 1)
+litellm_multi_node_replicas: 2
+litellm_multi_node_resources:
+  requests:
+    cpu: "2"
+    memory: "2Gi"
+  limits:
+    cpu: "4"
+    memory: "4Gi"
+

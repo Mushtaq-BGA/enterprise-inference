@@ -1,0 +1,658 @@
+---
+# =============================================================================
+# Langfuse — Install via Helm
+# =============================================================================
+# Uses existing platform PostgreSQL and MinIO.
+# Redis (Valkey) and ClickHouse deployed by Helm subcharts.
+# Single-node: 1 replica, minimal resources.
+# Multi-node:  2 replicas, HPA enabled.
+# =============================================================================
+
+# ── Idempotency check ─────────────────────────────────────────────────────────
+
+- name: "langfuse | Check for existing Helm release"
+  kubernetes.core.helm_info:
+    name: langfuse
+    release_namespace: "{{ langfuse_namespace }}"
+  register: _langfuse_release
+  failed_when: false
+
+- name: "langfuse | Already installed — skipping"
+  ansible.builtin.debug:
+    msg: "Langfuse already deployed in {{ langfuse_namespace }} — skipping install."
+  when: _langfuse_release.status is defined and _langfuse_release.status is not none
+
+- name: "langfuse | Install"
+  when: _langfuse_release.status is not defined or _langfuse_release.status is none
+  block:
+
+    # ── Detect cluster topology for sizing ───────────────────────────────────
+
+    - name: "langfuse | Detect cluster size"
+      ansible.builtin.set_fact:
+        _langfuse_is_multinode: "{{ (kubernetes_nodes | default([]) | length) > 1 }}"
+
+    - name: "langfuse | Set sizing based on cluster topology"
+      ansible.builtin.set_fact:
+        _langfuse_replicas: "{{ langfuse_multi_node_replicas if _langfuse_is_multinode | bool else langfuse_single_node_replicas }}"
+        _langfuse_web_resources: "{{ langfuse_multi_node_resources.web if _langfuse_is_multinode | bool else langfuse_single_node_resources.web }}"
+        _langfuse_worker_resources: "{{ langfuse_multi_node_resources.worker if _langfuse_is_multinode | bool else langfuse_single_node_resources.worker }}"
+
+    - name: "langfuse | Topology summary"
+      ansible.builtin.debug:
+        msg: "Langfuse sizing: {{ 'multi-node (' + (_langfuse_replicas | string) + ' replicas)' if _langfuse_is_multinode | bool else 'single-node (1 replica)' }}"
+
+    # ── Namespace ─────────────────────────────────────────────────────────────
+
+    - name: "langfuse | Create namespace"
+      kubernetes.core.k8s:
+        kind: Namespace
+        name: "{{ langfuse_namespace }}"
+        state: present
+
+    # ── PostgreSQL credentials ────────────────────────────────────────────────
+
+    - name: "langfuse | Wait for DB credentials secret"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: langfuse-db-secret
+        namespace: "{{ langfuse_namespace }}"
+      register: _langfuse_db_secret
+      until: _langfuse_db_secret.resources | length > 0
+      retries: 30
+      delay: 10
+
+    - name: "langfuse | Wait for langfuse database to be ready (CNPG Database CRD)"
+      kubernetes.core.k8s_info:
+        api_version: postgresql.cnpg.io/v1
+        kind: Database
+        name: langfuse
+        namespace: "{{ postgresql_namespace | default('postgresql') }}"
+      register: _langfuse_db_crd
+      until: >-
+        _langfuse_db_crd.resources | default([]) | length > 0 and
+        (_langfuse_db_crd.resources[0].status.applied | default(false) | bool)
+      retries: 60
+      delay: 5
+
+    - name: "langfuse | Extract DB connection details"
+      ansible.builtin.set_fact:
+        _langfuse_db_host: "{{ _langfuse_db_secret.resources[0].data.host | b64decode }}"
+        _langfuse_db_port: "{{ _langfuse_db_secret.resources[0].data.port | b64decode }}"
+        _langfuse_db_name: "{{ _langfuse_db_secret.resources[0].data.database | b64decode }}"
+        _langfuse_db_user: "{{ _langfuse_db_secret.resources[0].data.username | b64decode }}"
+        _langfuse_db_pass: "{{ _langfuse_db_secret.resources[0].data.password | b64decode }}"
+      no_log: true
+
+    # ── MinIO S3 credentials ──────────────────────────────────────────────────
+
+    - name: "langfuse | Load MinIO credentials"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: minio-credentials
+        namespace: "{{ minio_namespace | default('minio') }}"
+      register: _langfuse_minio_secret
+      failed_when: false
+
+    - name: "langfuse | Extract MinIO credentials"
+      ansible.builtin.set_fact:
+        _langfuse_s3_endpoint: "{{ _langfuse_minio_secret.resources[0].data.endpoint | b64decode }}"
+        _langfuse_s3_access_key: "{{ _langfuse_minio_secret.resources[0].data.rootUser | b64decode }}"
+        _langfuse_s3_secret_key: "{{ _langfuse_minio_secret.resources[0].data.rootPassword | b64decode }}"
+      no_log: true
+      when: _langfuse_minio_secret.resources | default([]) | length > 0
+
+    - name: "langfuse | Fallback S3 to empty (MinIO not available)"
+      ansible.builtin.set_fact:
+        _langfuse_s3_endpoint: ""
+        _langfuse_s3_access_key: ""
+        _langfuse_s3_secret_key: ""
+      when: _langfuse_minio_secret.resources | default([]) | length == 0
+
+    # ── Create MinIO bucket for Langfuse ─────────────────────────────────────
+
+    - name: "langfuse | Create MinIO bucket"
+      when: _langfuse_s3_endpoint | length > 0
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: langfuse-create-bucket
+            namespace: "{{ langfuse_namespace }}"
+          spec:
+            ttlSecondsAfterFinished: 60
+            template:
+              spec:
+                restartPolicy: OnFailure
+                containers:
+                  - name: mc
+                    image: minio/mc:RELEASE.2025-07-21T05-28-08Z
+                    command:
+                      - /bin/sh
+                      - -c
+                      - |
+                        mc alias set minio {{ _langfuse_s3_endpoint }} {{ _langfuse_s3_access_key }} {{ _langfuse_s3_secret_key }} &&
+                        mc mb --ignore-existing minio/{{ langfuse_s3_bucket }}
+      failed_when: false
+
+    # ── Langfuse secrets (stable across restarts — generated once) ───────────
+
+    - name: "langfuse | Check for existing secrets"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: langfuse-secrets
+        namespace: "{{ langfuse_namespace }}"
+      register: _langfuse_secrets_existing
+      failed_when: false
+
+    - name: "langfuse | Generate and store secrets"
+      when: _langfuse_secrets_existing.resources | default([]) | length == 0
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: langfuse-secrets
+            namespace: "{{ langfuse_namespace }}"
+          stringData:
+            salt: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+            encryption_key: "{{ lookup('password', '/dev/null length=64 chars=hexdigits') | lower }}"
+            nextauth_secret: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+            clickhouse_password: "{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
+            # Default admin account — seeded on first startup via LANGFUSE_INIT_* env vars
+            # Password set via LANGFUSE_ADMIN_PASSWORD env var at install time, or auto-generated
+            admin_email: "{{ langfuse_admin_email | default('admin@' + (base_domain_name | default('inference-example.com'))) }}"
+            admin_password: "{{ langfuse_admin_password }}"
+            admin_name: "admin"
+            # API keys for LiteLLM integration (pre-generated, stable)
+            public_key: "pk-lf-{{ lookup('password', '/dev/null length=32 chars=ascii_lowercase,digits') }}"
+            secret_key: "sk-lf-{{ lookup('password', '/dev/null length=32 chars=ascii_lowercase,digits') }}"
+            # Org/project IDs (stable UUIDs)
+            org_id: "{{ lookup('password', '/dev/null length=8 chars=ascii_lowercase,digits') }}-{{ lookup('password', '/dev/null length=4 chars=ascii_lowercase,digits') }}-{{ lookup('password', '/dev/null length=4 chars=ascii_lowercase,digits') }}-{{ lookup('password', '/dev/null length=4 chars=ascii_lowercase,digits') }}-{{ lookup('password', '/dev/null length=12 chars=ascii_lowercase,digits') }}"
+            project_id: "{{ lookup('password', '/dev/null length=8 chars=ascii_lowercase,digits') }}-{{ lookup('password', '/dev/null length=4 chars=ascii_lowercase,digits') }}-{{ lookup('password', '/dev/null length=4 chars=ascii_lowercase,digits') }}-{{ lookup('password', '/dev/null length=4 chars=ascii_lowercase,digits') }}-{{ lookup('password', '/dev/null length=12 chars=ascii_lowercase,digits') }}"
+
+    - name: "langfuse | Load secrets"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: langfuse-secrets
+        namespace: "{{ langfuse_namespace }}"
+      register: _langfuse_secrets
+
+    # Patch secret if clickhouse_password key is missing (upgrade path)
+    - name: "langfuse | Add clickhouse_password to secrets if missing"
+      when: _langfuse_secrets.resources[0].data.clickhouse_password is not defined
+      kubernetes.core.k8s:
+        state: patched
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: langfuse-secrets
+            namespace: "{{ langfuse_namespace }}"
+          stringData:
+            clickhouse_password: "{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
+
+    - name: "langfuse | Reload secrets (always — ensures fresh data after any patch)"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: langfuse-secrets
+        namespace: "{{ langfuse_namespace }}"
+      register: _langfuse_secrets
+
+    - name: "langfuse | Set secret facts"
+      ansible.builtin.set_fact:
+        _langfuse_salt: "{{ _langfuse_secrets.resources[0].data.salt | b64decode }}"
+        _langfuse_encryption_key: "{{ _langfuse_secrets.resources[0].data.encryption_key | b64decode }}"
+        _langfuse_nextauth_secret: "{{ _langfuse_secrets.resources[0].data.nextauth_secret | b64decode }}"
+        _langfuse_admin_email: "{{ _langfuse_secrets.resources[0].data.admin_email | b64decode }}"
+        _langfuse_admin_password: "{{ _langfuse_secrets.resources[0].data.admin_password | b64decode }}"
+        _langfuse_admin_name: "{{ _langfuse_secrets.resources[0].data.admin_name | b64decode }}"
+        _langfuse_public_key: "{{ _langfuse_secrets.resources[0].data.public_key | b64decode }}"
+        _langfuse_secret_key: "{{ _langfuse_secrets.resources[0].data.secret_key | b64decode }}"
+        _langfuse_org_id: "{{ _langfuse_secrets.resources[0].data.org_id | b64decode }}"
+        _langfuse_project_id: "{{ _langfuse_secrets.resources[0].data.project_id | b64decode }}"
+        _langfuse_clickhouse_password: "{{ _langfuse_secrets.resources[0].data.clickhouse_password | b64decode }}"
+      no_log: true
+
+    # ── Helm install ──────────────────────────────────────────────────────────
+
+    - name: "langfuse | Add Helm repo"
+      kubernetes.core.helm_repository:
+        name: "{{ langfuse_helm_repo_name }}"
+        repo_url: "{{ langfuse_helm_repo }}"
+
+    - name: "langfuse | Install via Helm"
+      kubernetes.core.helm:
+        name: langfuse
+        chart_ref: "{{ langfuse_helm_chart }}"
+        chart_version: "{{ langfuse_version }}"
+        release_namespace: "{{ langfuse_namespace }}"
+        create_namespace: true
+        wait: false
+        timeout: "10m0s"
+        values:
+          # Set fullnameOverride so service is named 'langfuse-web' predictably
+          fullnameOverride: "langfuse"
+
+          # All langfuse app settings are nested under the 'langfuse' key
+          langfuse:
+            replicas: "{{ _langfuse_replicas | int }}"
+            nodeEnv: production
+            features:
+              telemetryEnabled: false
+              signUpDisabled: false
+            salt:
+              value: "{{ _langfuse_salt }}"
+            encryptionKey:
+              value: "{{ _langfuse_encryption_key }}"
+
+            # NextAuth — nested under langfuse in chart v1.5.x
+            nextauth:
+              url: "https://{{ langfuse_hostname }}"
+              secret:
+                secretKeyRef:
+                  name: langfuse-secrets
+                  key: nextauth_secret
+
+            # Web UI sizing
+            web:
+              resources: "{{ _langfuse_web_resources }}"
+              livenessProbe:
+                initialDelaySeconds: 60
+                periodSeconds: 15
+                failureThreshold: 5
+              readinessProbe:
+                initialDelaySeconds: 30
+                periodSeconds: 10
+                failureThreshold: 5
+              pod:
+                affinity: "{{ _platform_affinity | default({}) }}"
+                securityContext:
+                  fsGroup: 1001
+                  runAsUser: 1001
+                  runAsNonRoot: true
+              containerSecurityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              hpa:
+                enabled: "{{ _langfuse_is_multinode | bool }}"
+                minReplicas: "{{ _langfuse_replicas | int }}"
+                maxReplicas: "{{ (_langfuse_replicas | int) * 2 }}"
+                targetCPUUtilizationPercentage: 70
+
+            # Worker sizing
+            worker:
+              resources: "{{ _langfuse_worker_resources }}"
+              pod:
+                affinity: "{{ _platform_affinity | default({}) }}"
+                securityContext:
+                  fsGroup: 1001
+                  runAsUser: 1001
+                  runAsNonRoot: true
+              containerSecurityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              hpa:
+                enabled: "{{ _langfuse_is_multinode | bool }}"
+                minReplicas: "{{ _langfuse_replicas | int }}"
+                maxReplicas: "{{ (_langfuse_replicas | int) * 2 }}"
+                targetCPUUtilizationPercentage: 70
+
+            # Disable ClickHouse cluster mode — we run single-node, no ZooKeeper
+            additionalEnv:
+              - name: CLICKHOUSE_CLUSTER_ENABLED
+                value: "false"
+              - name: LANGFUSE_INIT_ORG_ID
+                valueFrom:
+                  secretKeyRef:
+                    name: langfuse-secrets
+                    key: org_id
+              - name: LANGFUSE_INIT_ORG_NAME
+                value: "inference"
+              - name: LANGFUSE_INIT_PROJECT_ID
+                valueFrom:
+                  secretKeyRef:
+                    name: langfuse-secrets
+                    key: project_id
+              - name: LANGFUSE_INIT_PROJECT_NAME
+                value: "inference"
+              - name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: langfuse-secrets
+                    key: public_key
+              - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: langfuse-secrets
+                    key: secret_key
+              - name: LANGFUSE_INIT_USER_EMAIL
+                valueFrom:
+                  secretKeyRef:
+                    name: langfuse-secrets
+                    key: admin_email
+              - name: LANGFUSE_INIT_USER_NAME
+                valueFrom:
+                  secretKeyRef:
+                    name: langfuse-secrets
+                    key: admin_name
+              - name: LANGFUSE_INIT_USER_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: langfuse-secrets
+                    key: admin_password
+
+          # ── PostgreSQL — use our existing instance ────────────────────────
+          postgresql:
+            deploy: false
+            host: "{{ _langfuse_db_host }}"
+            port: "{{ _langfuse_db_port | int }}"
+            auth:
+              username: "{{ _langfuse_db_user }}"
+              password: "{{ _langfuse_db_pass }}"
+              database: "{{ _langfuse_db_name }}"
+
+          # ── ClickHouse — deployed by Helm subchart (bitnami/clickhouse) ────
+          clickhouse:
+            deploy: true
+            clusterEnabled: false
+            shards: 1
+            replicaCount: 1
+            auth:
+              username: default
+              password: "{{ _langfuse_clickhouse_password }}"
+            migration:
+              url: "clickhouse://default:{{ _langfuse_clickhouse_password }}@langfuse-clickhouse:9000"
+            persistence:
+              size: "{{ langfuse_clickhouse_storage_size | default('50Gi') }}"
+            resourcesPreset: "small"
+            networkPolicy:
+              enabled: false
+            zookeeper:
+              enabled: false
+              networkPolicy:
+                enabled: false
+            podSecurityContext:
+              fsGroup: 1001
+              runAsUser: 1001
+              runAsNonRoot: true
+            containerSecurityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+
+          # ── Redis/Valkey — deployed by Helm subchart (bitnami/valkey) ───────
+          redis:
+            deploy: true
+            architecture: standalone
+            auth:
+              enabled: false
+            networkPolicy:
+              enabled: false
+            primary:
+              extraFlags:
+                - "--maxmemory-policy noeviction"
+              podSecurityContext:
+                fsGroup: 1001
+                runAsUser: 1001
+                runAsNonRoot: true
+              containerSecurityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+
+          # ── S3/MinIO — use our existing MinIO ─────────────────────────────
+          s3:
+            deploy: false
+            bucket: "{{ langfuse_s3_bucket }}"
+            region: "us-east-1"
+            endpoint: "{{ _langfuse_s3_endpoint }}"
+            forcePathStyle: true
+            accessKeyId:
+              value: "{{ _langfuse_s3_access_key }}"
+            secretAccessKey:
+              value: "{{ _langfuse_s3_secret_key }}"
+
+    # ── Fix failed Prisma migrations (Langfuse bug: some migrations not idempotent on empty DB)
+    - name: "langfuse | Wait for initial migration attempt (45s)"
+      ansible.builtin.pause:
+        seconds: 45
+
+    - name: "langfuse | Check for failed Prisma migrations"
+      kubernetes.core.k8s_exec:
+        namespace: "{{ postgresql_namespace | default('postgresql') }}"
+        pod: "{{ postgresql_cluster_name | default('postgresql') }}-1"
+        container: postgres
+        command:
+          - psql
+          - -U
+          - langfuse
+          - -d
+          - langfuse
+          - -tAc
+          - "SELECT count(*) FROM _prisma_migrations WHERE rolled_back_at IS NOT NULL OR (finished_at IS NULL AND started_at IS NOT NULL);"
+      register: _langfuse_failed_migration
+      failed_when: false
+      changed_when: false
+
+    - name: "langfuse | Auto-resolve failed Prisma migrations"
+      when: (_langfuse_failed_migration.stdout | default('0') | trim | int) > 0
+      block:
+        - name: "langfuse | Delete failed migration records"
+          kubernetes.core.k8s_exec:
+            namespace: "{{ postgresql_namespace | default('postgresql') }}"
+            pod: "{{ postgresql_cluster_name | default('postgresql') }}-1"
+            container: postgres
+            command:
+              - psql
+              - -U
+              - langfuse
+              - -d
+              - langfuse
+              - -c
+              - "DELETE FROM _prisma_migrations WHERE rolled_back_at IS NOT NULL OR (finished_at IS NULL AND started_at IS NOT NULL);"
+
+        - name: "langfuse | Restart pods to retry migrations"
+          ansible.builtin.shell: |
+            kubectl rollout restart deployment -n {{ langfuse_namespace }} -l app.kubernetes.io/instance=langfuse
+          changed_when: true
+
+    # ── Wait for readiness (with progress) ───────────────────────────────────
+
+    - name: "langfuse | Waiting for pods to be ready (image pull may take a few minutes)..."
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: "{{ langfuse_namespace }}"
+        label_selectors:
+          - app.kubernetes.io/instance=langfuse
+      register: _langfuse_pods
+      until:
+        - _langfuse_pods.resources | default([]) | length > 0
+        - _langfuse_pods.resources | selectattr('status.phase', 'eq', 'Running') | list | length == (_langfuse_pods.resources | length)
+      retries: 120
+      delay: 5
+
+    - name: "langfuse | Progress: {{ _langfuse_pods.resources | default([]) | length }} pods, phases: {{ _langfuse_pods.resources | default([]) | map(attribute='status.phase') | list | join(', ') }}"
+      ansible.builtin.debug:
+        msg: "All Langfuse pods running."
+
+    - name: "langfuse | Wait for web deployment ready"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        label_selectors:
+          - "app.kubernetes.io/component=web"
+          - "app.kubernetes.io/instance=langfuse"
+        namespace: "{{ langfuse_namespace }}"
+      register: _langfuse_web_deploy
+      until:
+        - _langfuse_web_deploy.resources | default([]) | length > 0
+        - _langfuse_web_deploy.resources[0].status.conditions | default([]) | selectattr('type','eq','Available') | selectattr('status','eq','True') | list | length > 0
+      retries: 60
+      delay: 5
+
+    - name: "langfuse | Wait for worker deployment ready"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        label_selectors:
+          - "app.kubernetes.io/component=worker"
+          - "app.kubernetes.io/instance=langfuse"
+        namespace: "{{ langfuse_namespace }}"
+      register: _langfuse_worker_deploy
+      until:
+        - _langfuse_worker_deploy.resources | default([]) | length > 0
+        - _langfuse_worker_deploy.resources[0].status.conditions | default([]) | selectattr('type','eq','Available') | selectattr('status','eq','True') | list | length > 0
+      retries: 60
+      delay: 5
+
+# ── Load secrets for use in tasks outside the install block ──────────────────
+# Runs unconditionally so re-runs (Helm already installed) still have keys set
+
+- name: "langfuse | Load secrets (unconditional — needed for LiteLLM injection)"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: langfuse-secrets
+    namespace: "{{ langfuse_namespace }}"
+  register: _langfuse_secrets_outer
+  failed_when: false
+
+- name: "langfuse | Set API key facts from existing secret"
+  when: _langfuse_secrets_outer.resources | default([]) | length > 0
+  ansible.builtin.set_fact:
+    _langfuse_public_key: "{{ _langfuse_secrets_outer.resources[0].data.public_key | b64decode }}"
+    _langfuse_secret_key: "{{ _langfuse_secrets_outer.resources[0].data.secret_key | b64decode }}"
+
+# ── Gateway integration ───────────────────────────────────────────────────────
+
+- name: "langfuse | Create HTTPRoute"
+  when: gateway_create | bool
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: langfuse
+        namespace: "{{ langfuse_namespace }}"
+      spec:
+        parentRefs:
+          - name: "{{ gateway_name | default('eg-gateway') }}"
+            namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
+            sectionName: https
+        hostnames:
+          - "{{ langfuse_hostname }}"
+        rules:
+          - matches:
+              - path:
+                  type: PathPrefix
+                  value: /
+            backendRefs:
+              - name: langfuse-web
+                port: 3000
+
+- name: "langfuse | Create no-auth SecurityPolicy (Langfuse has its own login)"
+  when: gateway_create | bool and auth_provider | default('none') in ['keycloak', 'litellm']
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: SecurityPolicy
+      metadata:
+        name: langfuse-no-auth
+        namespace: "{{ langfuse_namespace }}"
+      spec:
+        targetRefs:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+            name: langfuse
+
+# ── Wire LiteLLM → Langfuse callback ─────────────────────────────────────────
+
+- name: "langfuse | Configure LiteLLM to send traces to Langfuse"
+  when: litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm'
+  block:
+    - name: "langfuse | Get Langfuse public key from API"
+      ansible.builtin.uri:
+        url: "http://langfuse-web.{{ langfuse_namespace }}.svc.cluster.local:3000/api/auth/login"
+        method: GET
+        status_code: [200, 405]
+        timeout: 10
+      register: _langfuse_api_check
+      failed_when: false
+
+    - name: "langfuse | Inject Langfuse API keys into LiteLLM (no manual step needed)"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: langfuse-api-keys
+            namespace: "{{ litellm_namespace | default('litellm') }}"
+            labels:
+              app.kubernetes.io/managed-by: ansible
+          stringData:
+            LANGFUSE_HOST: "http://langfuse-web.{{ langfuse_namespace }}.svc.cluster.local:3000"
+            LANGFUSE_PUBLIC_KEY: "{{ _langfuse_public_key }}"
+            LANGFUSE_SECRET_KEY: "{{ _langfuse_secret_key }}"
+      failed_when: false
+
+    - name: "langfuse | Patch LiteLLM deployment to use Langfuse API keys"
+      kubernetes.core.k8s:
+        state: patched
+        api_version: apps/v1
+        kind: Deployment
+        name: litellm
+        namespace: "{{ litellm_namespace | default('litellm') }}"
+        definition:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: litellm
+                    envFrom:
+                      - secretRef:
+                          name: langfuse-api-keys
+      failed_when: false
+
+# ── Store credentials ─────────────────────────────────────────────────────────
+
+- name: "langfuse | Store access info"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: langfuse-credentials
+        namespace: "{{ langfuse_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: ansible
+      data:
+        hostname: "{{ langfuse_hostname }}"
+        ui_url: "https://{{ langfuse_hostname }}"
+        admin_email_hint: "kubectl get secret langfuse-secrets -n {{ langfuse_namespace }} -o jsonpath='{.data.admin_email}' | base64 -d"
+        admin_password_hint: "kubectl get secret langfuse-secrets -n {{ langfuse_namespace }} -o jsonpath='{.data.admin_password}' | base64 -d"
+        internal_url: "http://langfuse-web.{{ langfuse_namespace }}.svc.cluster.local:3000"
+
+- name: "langfuse | Install complete"
+  ansible.builtin.debug:
+    msg:
+      - "Langfuse deployed in namespace '{{ langfuse_namespace }}'"
+      - "UI: https://{{ langfuse_hostname }}"
+      - "Admin email: kubectl get secret langfuse-secrets -n {{ langfuse_namespace }} -o jsonpath='{.data.admin_email}' | base64 -d"
+      - "Admin password: kubectl get secret langfuse-secrets -n {{ langfuse_namespace }} -o jsonpath='{.data.admin_password}' | base64 -d"
+      - "LiteLLM integration: auto-configured (Langfuse API keys injected into LiteLLM)"

@@ -1,0 +1,56 @@
+---
+# Copyright (C) 2025-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# agentgateway — defaults
+# =============================================================================
+# agentgateway is the alternative AI gateway data plane (selected via
+# ai_gateway_provider: agentgateway). It ships its own control plane + CRDs and
+# is conformant to the Kubernetes Gateway API. It occupies the SAME slot as the
+# Envoy AI Gateway: it sits behind the edge eg-gateway and dispatches inference
+# traffic to KServe InferencePool / Service backends on the unified URL.
+#
+# To keep the rest of the stack provider-agnostic, the public Gateway it creates
+# reuses the same name/namespace/service as the Envoy AI Gateway path
+# (ai-gateway / llm-inference / ai-gateway). Only the control plane, GatewayClass,
+# and per-model routing CRDs differ.
+# =============================================================================
+
+# --- Control plane (Helm, OCI) ---
+agentgateway_version: "1.3.1"
+agentgateway_namespace: "agentgateway-system"
+agentgateway_helm_repo: "oci://cr.agentgateway.dev/charts"
+agentgateway_wait_timeout: "300s"
+
+# Enable the Gateway API Inference Extension integration. REQUIRED for routing
+# to KServe InferencePool backends (our epp routing path): it grants the
+# controller RBAC on inference.networking.k8s.io and turns on InferencePool
+# reconciliation + endpoint-picker (EPP) dispatch. Without it, HTTPRoutes whose
+# backendRef is an InferencePool cannot resolve endpoints.
+agentgateway_inference_extension_enabled: true
+
+# --- Gateway API CRDs (agentgateway needs the standard channel) ---
+# Kept in step with the version pulled by other roles; applied server-side.
+agentgateway_gateway_api_version: "v1.5.0"
+agentgateway_gateway_api_manifest: >-
+  https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ agentgateway_gateway_api_version }}/standard-install.yaml
+
+# --- Public AI Gateway resource ---
+# Same identity as the Envoy AI Gateway path so eg-gateway's bridge HTTPRoute
+# and model-manager defaults are unchanged when switching providers.
+ai_gateway_create: true
+ai_gateway_name: "ai-gateway"
+ai_gateway_class_name: "agentgateway"
+ai_gateway_namespace: "{{ kserve_llmisvc_namespace | default('llm-inference') }}"
+
+# Stable data-plane service name (agentgateway names the Service after the
+# Gateway, so this equals ai_gateway_name). Internal consumers reach it at:
+#   <ai_gateway_service_name>.<ai_gateway_namespace>.svc.cluster.local:80
+ai_gateway_service_name: "ai-gateway"
+
+# External inference hostname (eg-gateway TLS listener → ai-gateway).
+inference_hostname: "inference.{{ base_domain_name | default('inference-example.com') }}"
+
+# Edge gateway to bridge from (must match the envoy_gateway role).
+envoy_gateway_name: "eg-gateway"
+envoy_gateway_namespace: "envoy-gateway-system"

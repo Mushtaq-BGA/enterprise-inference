@@ -1,0 +1,60 @@
+# vLLM ServingRuntime for KServe
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: vllm-runtime
+spec:
+  annotations:
+    prometheus.kserve.io/port: "8080"
+    prometheus.kserve.io/path: "/metrics"
+  supportedModelFormats:
+    - name: vllm
+      version: "1"
+      autoSelect: true
+  containers:
+    - name: kserve-container
+      image: vllm/vllm-openai:v0.22.0
+      command:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+      args:
+        - --model
+        - "{{.Name}}"
+        - --port
+        - "8080"
+        # Emit per-request spans (prefill, decode, scheduling phases)
+        - --collect-detailed-traces
+        - all
+      env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        # ── OpenTelemetry (industry standard env vars — OTel spec) ──────────
+        # Any OTel-instrumented app reads these automatically.
+        # Traces flow: vLLM → OTel Collector → Tempo → Grafana
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://opentelemetry-collector.monitoring.svc.cluster.local:4317"
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: "grpc"
+        - name: OTEL_TRACES_EXPORTER
+          value: "otlp"
+        # Service name from pod name — Downward API does not support label keys
+        # with slashes so we use metadata.name (pod name includes model name).
+        - name: OTEL_SERVICE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      resources:
+        requests:
+          cpu: "2"
+          memory: "8Gi"
+        limits:
+          cpu: "4"
+          memory: "16Gi"

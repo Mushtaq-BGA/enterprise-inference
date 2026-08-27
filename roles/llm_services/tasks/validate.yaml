@@ -1,0 +1,101 @@
+---
+# =============================================================================
+# LLM Services — validate namespace, runtimes, and workloads
+# =============================================================================
+
+- name: "llm_services | Check namespace"
+  ansible.builtin.command:
+    cmd: "kubectl get namespace {{ llm_services_namespace }}"
+  changed_when: false
+
+- name: "llm_services | List ServingRuntimes"
+  ansible.builtin.command:
+    cmd: "kubectl get servingruntime -n {{ llm_services_namespace }} --no-headers"
+  changed_when: false
+  register: _llm_runtimes
+  failed_when: false
+
+- name: "llm_services | Report runtimes"
+  ansible.builtin.debug:
+    msg: "{{ _llm_runtimes.stdout_lines | default(['No ServingRuntimes deployed.']) }}"
+
+- name: "llm_services | List InferenceServices"
+  ansible.builtin.command:
+    cmd: "kubectl get inferenceservice -n {{ llm_services_namespace }} --no-headers"
+  changed_when: false
+  register: _llm_isvcs
+  failed_when: false
+
+- name: "llm_services | Report InferenceServices"
+  ansible.builtin.debug:
+    msg: "{{ _llm_isvcs.stdout_lines | default(['No InferenceServices deployed.']) }}"
+
+- name: "llm_services | List LLMInferenceServices"
+  ansible.builtin.command:
+    cmd: "kubectl get llminferenceservice -n {{ llm_services_namespace }} --no-headers"
+  changed_when: false
+  register: _llm_llmisvcs
+  failed_when: false
+
+- name: "llm_services | Report LLMInferenceServices"
+  ansible.builtin.debug:
+    msg: "{{ _llm_llmisvcs.stdout_lines | default(['No LLMInferenceServices deployed.']) }}"
+
+# ── CPU policy consistency ───────────────────────────────────────────────────
+# The configured kubernetes_cpu_policy must match what the cluster actually
+# runs, otherwise models are annotated for a mechanism that is not there and
+# silently lose their CPU pinning. Check both mechanisms and report mismatches.
+
+- name: "llm_services | Check NRI balloons DaemonSet"
+  ansible.builtin.command:
+    cmd: kubectl get daemonset nri-resource-policy-balloons -n kube-system -o name
+  changed_when: false
+  failed_when: false
+  register: _llm_nri_ds
+
+- name: "llm_services | Read kubelet cpuManagerPolicy from a node"
+  ansible.builtin.shell: |
+    set -o pipefail
+    node=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+    kubectl get --raw "/api/v1/nodes/${node}/proxy/configz" \
+      | grep -o '"cpuManagerPolicy":"[^"]*"' | head -1 | cut -d'"' -f4
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  register: _llm_kubelet_cpu_policy
+
+- name: "llm_services | Report CPU policy state"
+  ansible.builtin.debug:
+    msg:
+      - "Configured kubernetes_cpu_policy: {{ kubernetes_cpu_policy | default('nri-balloons') }}"
+      - "NRI balloons DaemonSet: {{ 'present' if _llm_nri_ds.rc == 0 else 'absent' }}"
+      - "kubelet cpuManagerPolicy: {{ _llm_kubelet_cpu_policy.stdout | default('') | trim | default('unknown (needs RBAC on nodes/proxy)', true) }}"
+
+- name: "llm_services | Warn when the CPU policy does not match the cluster"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: kubernetes_cpu_policy={{ kubernetes_cpu_policy | default('nri-balloons') }}
+      but
+      {%- if (kubernetes_cpu_policy | default('nri-balloons')) == 'nri-balloons' %}
+      the nri-resource-policy-balloons DaemonSet is not present in kube-system.
+      Models will be annotated for NRI but get no CPU pinning. Run the
+      nri_cpu_balloons role (./es_auto_installer.sh install nri_cpu_balloons).
+      {%- else %}
+      kubelet reports cpuManagerPolicy='{{ _llm_kubelet_cpu_policy.stdout | default('') | trim }}',
+      not 'static'. Guaranteed pods will NOT get exclusive CPUs. Re-run
+      ./es_auto_installer.sh install kubernetes with
+      kubernetes_cpu_policy=kubelet-static to reconfigure kubelet.
+      {%- endif %}
+  when: >-
+    ((kubernetes_cpu_policy | default('nri-balloons')) == 'nri-balloons' and _llm_nri_ds.rc != 0)
+    or ((kubernetes_cpu_policy | default('nri-balloons')) == 'kubelet-static'
+        and (_llm_kubelet_cpu_policy.stdout | default('') | trim) not in ['static', ''])
+
+- name: "llm_services | Validation passed"
+  ansible.builtin.debug:
+    msg: >-
+      LLM services validation passed.
+      CPU policy: {{ kubernetes_cpu_policy | default('nri-balloons') }}.
+      InferenceServices: {{ _llm_isvcs.stdout_lines | default([]) | length }},
+      LLMInferenceServices: {{ _llm_llmisvcs.stdout_lines | default([]) | length }}.

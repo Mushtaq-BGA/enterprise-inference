@@ -1,0 +1,26 @@
+---
+# =============================================================================
+# Keycloak Config — Teardown
+# =============================================================================
+
+- name: "keycloak_config | Delete KeycloakRealmImport CR (if lingering)"
+  kubernetes.core.k8s:
+    api_version: k8s.keycloak.org/v2beta1
+    kind: KeycloakRealmImport
+    name: "{{ keycloak_realm }}-realm-import"
+    namespace: "{{ keycloak_namespace }}"
+    state: absent
+  failed_when: false
+
+- name: "keycloak_config | Delete client secret"
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Secret
+    name: "{{ keycloak_client_secret_name }}"
+    namespace: "{{ keycloak_namespace }}"
+    state: absent
+  failed_when: false
+
+- name: "keycloak_config | Teardown complete"
+  ansible.builtin.debug:
+    msg: "Inference Keycloak config resources removed."

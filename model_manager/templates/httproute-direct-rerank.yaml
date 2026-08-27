@@ -1,0 +1,58 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: direct-{{MODEL_NAME}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: {{MODEL_NAME}}
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{AI_GATEWAY_NAME}}
+      namespace: {{AI_GATEWAY_NAMESPACE}}
+      sectionName: http
+  # Rerank/score are vLLM extensions on non-OpenAI paths (/v1/rerank, /v2/rerank
+  # Cohere/Jina-compatible, /v1/score). The gateway's ext-proc understands neither
+  # the paths nor the bodies, so it can't extract "model" or inject x-ai-eg-model —
+  # and would 400 the body if it tried. We match the rerank/score paths directly
+  # and inject the header server-side, so the workload receives a routed request
+  # with no client header required. The header match on / lets LiteLLM / explicit
+  # callers disambiguate when several rerank models share these paths.
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/rerank
+        - path:
+            type: PathPrefix
+            value: /v2/rerank
+        - path:
+            type: PathPrefix
+            value: /rerank
+        - path:
+            type: PathPrefix
+            value: /v1/score
+        - path:
+            type: PathPrefix
+            value: /score
+        - headers:
+            - name: x-ai-eg-model
+              type: Exact
+              value: {{MODEL_NAME}}
+          path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            set:
+              - name: x-ai-eg-model
+                value: {{MODEL_NAME}}
+      timeouts:
+        request: {{ROUTE_TIMEOUT}}
+      backendRefs:
+        - kind: Service
+          name: {{SERVICE_NAME}}
+          port: {{SERVICE_PORT}}

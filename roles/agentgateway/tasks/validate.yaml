@@ -1,0 +1,45 @@
+---
+# Copyright (C) 2025-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# agentgateway — Validate
+# =============================================================================
+
+- name: "agentgateway | Check control-plane deployment"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ agentgateway_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/name=agentgateway"
+  register: _agw_deploy
+
+- name: "agentgateway | Assert control plane running"
+  ansible.builtin.assert:
+    that:
+      - _agw_deploy.resources | length > 0
+      - (_agw_deploy.resources[0].status.readyReplicas | default(0) | int) >= 1
+    fail_msg: "agentgateway control plane has 0 ready replicas"
+    success_msg: "agentgateway control plane has {{ _agw_deploy.resources[0].status.readyReplicas | default(0) }} ready replica(s)"
+
+- name: "agentgateway | Check AI Gateway accepted"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ ai_gateway_name }}"
+    namespace: "{{ ai_gateway_namespace }}"
+  register: _agw_gw
+  when: ai_gateway_create | bool
+
+- name: "agentgateway | Assert AI Gateway accepted"
+  ansible.builtin.assert:
+    that:
+      - _agw_gw.resources | length > 0
+      - _agw_gw.resources[0].status.conditions | default([]) | selectattr('type','eq','Accepted') | selectattr('status','eq','True') | list | length > 0
+    fail_msg: "AI Gateway '{{ ai_gateway_name }}' is not Accepted"
+    success_msg: "AI Gateway '{{ ai_gateway_name }}' is Accepted"
+  when: ai_gateway_create | bool
+
+- name: "agentgateway | Validation passed"
+  ansible.builtin.debug:
+    msg: "agentgateway validation passed."

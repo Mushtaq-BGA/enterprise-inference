@@ -1,0 +1,57 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: {{MODEL_NAME}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: {{MODEL_NAME}}
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  endpoints:
+    - fqdn:
+        hostname: {{SERVICE_NAME}}.{{NAMESPACE}}.svc.cluster.local
+        port: {{SERVICE_PORT}}
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIServiceBackend
+metadata:
+  name: {{MODEL_NAME}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: {{MODEL_NAME}}
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  schema:
+    name: OpenAI
+  backendRef:
+    group: gateway.envoyproxy.io
+    kind: Backend
+    name: {{MODEL_NAME}}
+    port: {{SERVICE_PORT}}
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: aigw-{{MODEL_NAME}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: {{MODEL_NAME}}
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{AI_GATEWAY_NAME}}
+      namespace: {{AI_GATEWAY_NAMESPACE}}
+      sectionName: http
+  rules:
+    - matches:
+        - headers:
+            - name: x-ai-eg-model
+              type: Exact
+              value: {{MODEL_NAME}}
+      timeouts:
+        request: {{ROUTE_TIMEOUT}}
+      backendRefs:
+        - name: {{MODEL_NAME}}
+          weight: 1

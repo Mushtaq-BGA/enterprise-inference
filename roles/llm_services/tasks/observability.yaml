@@ -1,0 +1,68 @@
+---
+# =============================================================================
+# LLM Services — Observability wiring
+#
+# For each engine in llm_services_engines this task deploys:
+#   1. ServiceMonitor  → files/servicemonitors/<engine>.yaml  (Prometheus scraping)
+#   2. Grafana dashboard ConfigMap → files/dashboards/<engine>.json (auto-loaded by Grafana sidecar)
+#
+# HOW TO ADD A NEW ENGINE (e.g. triton):
+#   1. Create files/servicemonitors/triton.yaml  (ServiceMonitor pointing at :metrics)
+#   2. Create files/dashboards/triton.json       (Grafana dashboard JSON)
+#   3. Add 'triton' to llm_services_engines in defaults/main.yaml
+#   That's it — this task iterates the list and deploys both automatically.
+#
+# HOW TO DISABLE AN ENGINE:
+#   Remove it from llm_services_engines — nothing is deleted from the cluster
+#   (ServiceMonitor and ConfigMap are left in place until teardown).
+# =============================================================================
+
+- name: "llm_services | observability | Check for ServiceMonitor file"
+  ansible.builtin.stat:
+    path: "{{ role_path }}/files/servicemonitors/{{ item }}.yaml"
+  loop: "{{ llm_services_engines }}"
+  register: _llm_sm_files
+
+- name: "llm_services | observability | Deploy ServiceMonitors"
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ observability_namespace | default('monitoring') }}"
+    src: "{{ role_path }}/files/servicemonitors/{{ item.item }}.yaml"
+  loop: "{{ _llm_sm_files.results }}"
+  loop_control:
+    label: "ServiceMonitor/{{ item.item }}"
+  when: item.stat.exists
+
+- name: "llm_services | observability | Check for dashboard file"
+  ansible.builtin.stat:
+    path: "{{ role_path }}/files/dashboards/{{ item }}.json"
+  loop: "{{ llm_services_engines }}"
+  register: _llm_dash_files
+
+- name: "llm_services | observability | Deploy Grafana dashboard ConfigMaps"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "grafana-dashboard-{{ item.item }}"
+        namespace: "{{ llm_services_namespace }}"
+        labels:
+          grafana_dashboard: "1"
+          app.kubernetes.io/managed-by: ansible
+          inference-engine: "{{ item.item }}"
+      data:
+        dashboard.json: "{{ lookup('file', role_path + '/files/dashboards/' + item.item + '.json') }}"
+  loop: "{{ _llm_dash_files.results }}"
+  loop_control:
+    label: "Dashboard/{{ item.item }}"
+  when: item.stat.exists
+
+- name: "llm_services | observability | Engines without dashboard file (skipped)"
+  ansible.builtin.debug:
+    msg: "No dashboard file found for '{{ item.item }}' — skipping (add files/dashboards/{{ item.item }}.json to enable)"
+  loop: "{{ _llm_dash_files.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not item.stat.exists

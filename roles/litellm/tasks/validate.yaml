@@ -1,0 +1,44 @@
+---
+# =============================================================================
+# LiteLLM — Validate
+# =============================================================================
+
+- name: "litellm | validate | Check deployment"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: litellm
+    namespace: "{{ litellm_namespace }}"
+  register: _val_deploy
+  failed_when: >-
+    _val_deploy.resources | default([]) | length == 0 or
+    _val_deploy.resources[0].status.conditions | default([]) |
+    selectattr('type','eq','Available') | selectattr('status','eq','True') | list | length == 0
+
+- name: "litellm | validate | Check /health endpoint"
+  ansible.builtin.uri:
+    url: "http://litellm.{{ litellm_namespace }}.svc.cluster.local:4000/health"
+    method: GET
+    status_code: 200
+    timeout: 10
+  register: _val_health
+  retries: 5
+  delay: 5
+  until: _val_health.status == 200
+  failed_when: false
+
+- name: "litellm | validate | Check master key is set"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: litellm-master-key
+    namespace: "{{ litellm_namespace }}"
+  register: _val_secret
+  failed_when: _val_secret.resources | default([]) | length == 0
+
+- name: "litellm | validate | Summary"
+  ansible.builtin.debug:
+    msg:
+      - "LiteLLM deployment: {{ 'OK' if _val_deploy.resources | length > 0 else 'FAIL' }}"
+      - "LiteLLM /health: {{ 'OK' if _val_health.status | default(0) == 200 else 'WARN (check manually)' }}"
+      - "Master key secret: {{ 'OK' if _val_secret.resources | length > 0 else 'FAIL' }}"

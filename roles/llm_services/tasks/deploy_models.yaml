@@ -1,0 +1,208 @@
+---
+# Deploy catalog models after LLM services infrastructure is ready.
+# Included during the `install inference` phase when llm_services_deploy_models is true.
+#
+# model-manager v2 interface: there is no bulk "deploy default models" script.
+# Deployment is driven per-model through the `model-manager` CLI over the model
+# catalog (models.yaml). This task enumerates the catalog and runs
+# `./model-manager deploy <name>` for each entry.
+
+- name: Check if model deployment should be skipped
+  set_fact:
+    skip_model_deployment: "{{ lookup('env', 'SKIP_MODEL_DEPLOYMENT') | default(skip_models | default('false')) | bool }}"
+
+- name: Show model deployment status
+  debug:
+    msg: "Model deployment: {{ 'SKIPPED (--skip-models flag)' if skip_model_deployment else 'ENABLED' }}"
+
+- block:
+    # Model catalog: prefer the environment's seeded copy (env/<env>/models.yaml,
+    # created by `init` and editable by the operator); fall back to the catalog
+    # shipped in the model_manager directory.
+    - name: Resolve model catalog path (env copy preferred)
+      set_fact:
+        _mm_dir: "{{ inference_extension_dir }}/model_manager"
+        _mm_catalog: >-
+          {{ (env_dir ~ '/models.yaml')
+             if (env_dir is defined and (env_dir ~ '/models.yaml') is exists)
+             else (inference_extension_dir ~ '/model_manager/models.yaml') }}
+
+    - name: Verify model-manager CLI and catalog are present
+      stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ _mm_dir }}/model-manager"
+        - "{{ _mm_catalog }}"
+      register: _mm_files
+
+    - name: Fail if model-manager CLI or catalog is missing
+      fail:
+        msg: >-
+          model-manager CLI or model catalog not found
+          ({{ _mm_dir }}/model-manager, {{ _mm_catalog }}).
+          Check the enterprise.ai-inference extension is present.
+      when: _mm_files.results | rejectattr('stat.exists') | list | length > 0
+
+    - name: Wait for KServe to be ready
+      shell: |
+        kubectl wait --for=condition=ready pod \
+          -l control-plane=kserve-controller-manager \
+          -n kserve \
+          --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubernetes_kubeconfig | default(ansible_env.HOME + '/.kube/config') }}"
+      register: kserve_ready
+      retries: 3
+      delay: 10
+      until: kserve_ready.rc == 0
+
+    - name: Check if Hugging Face token is available
+      set_fact:
+        hf_token_available: "{{ lookup('env', 'HF_TOKEN') | length > 0 }}"
+
+    - name: Show Hugging Face token status
+      debug:
+        msg: |
+          {% if hf_token_available %}
+          Hugging Face token detected - gated models can be downloaded
+          {% else %}
+          No HF_TOKEN set - only public models will be accessible
+          Set HF_TOKEN environment variable to download gated models (e.g., Llama)
+          {% endif %}
+
+    - name: "Deploy models | Load LiteLLM master key (when auth_provider=litellm)"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: litellm-master-key
+        namespace: "{{ litellm_namespace | default('litellm') }}"
+      register: _deploy_litellm_secret
+      failed_when: false
+      when: auth_provider | default('keycloak') == 'litellm'
+
+    # Enumerate the catalog model names (jq over the YAML->JSON, the same shape
+    # the CLI itself uses). Select only models opted in with `autodeploy: true`
+    # so a full install does not accidentally serve the entire catalog (which
+    # can include large models like an 8B). Models without the flag are left for
+    # the operator to deploy manually with `./model-manager deploy <name>`.
+    - name: Enumerate autodeploy models from the catalog
+      shell: |
+        set -o pipefail
+        yq -o=json '.' "{{ _mm_catalog }}" | jq -r '.models[] | select(.autodeploy == true) | .name'
+      args:
+        executable: /bin/bash
+      register: _mm_model_names
+      changed_when: false
+
+    - name: Show models to deploy
+      debug:
+        msg: >-
+          {{ (_mm_model_names.stdout_lines | length)
+             ~ ' model(s) marked autodeploy: '
+             ~ (_mm_model_names.stdout_lines | join(', ') if _mm_model_names.stdout_lines | length
+                else '(none — set autodeploy: true in models.yaml to auto-deploy on install)') }}
+
+    # Deploy each catalog model through the v2 CLI. MM_CONFIG points the CLI at
+    # the resolved catalog; --wait blocks until Ready unless model_deploy_flags
+    # overrides it. Runtime behavior (proxy, LiteLLM/AIGateway registration,
+    # NRI) is passed through the MM_* environment the CLI reads.
+    - name: Deploy each catalog model
+      shell: |
+        ./model-manager deploy "{{ item }}" --wait {{ model_deploy_flags | default('') }}
+      args:
+        chdir: "{{ _mm_dir }}"
+      environment:
+        KUBECONFIG: "{{ kubernetes_kubeconfig | default(ansible_env.HOME + '/.kube/config') }}"
+        HF_TOKEN: "{{ lookup('env', 'HF_TOKEN') | default('') }}"
+        MM_CONFIG: "{{ _mm_catalog }}"
+        # Proxy — pass through so weight downloads work behind a corporate proxy.
+        MM_HTTP_PROXY: "{{ http_proxy | default(lookup('env', 'http_proxy')) | default('') }}"
+        MM_HTTPS_PROXY: "{{ https_proxy | default(lookup('env', 'https_proxy')) | default('') }}"
+        MM_NO_PROXY: "{{ no_proxy | default(lookup('env', 'no_proxy')) | default('') }}"
+        # CPU pinning. MM_CPU_POLICY is the switch the CLI reads (nri-balloons |
+        # kubelet-static | best-effort); it mirrors the cluster-wide
+        # kubernetes_cpu_policy resolved in the solutions preflight, so the
+        # models are annotated for whatever kubelet/NRI was actually configured.
+        MM_CPU_POLICY: "{{ kubernetes_cpu_policy | default('nri-balloons') }}"
+        # Legacy flag, kept for older model-manager builds that only understand
+        # this one. MM_CPU_POLICY takes precedence when both are present.
+        MM_NRI_ENABLED: "{{ 'true' if kubernetes_cpu_policy | default('nri-balloons') == 'nri-balloons' else 'false' }}"
+        # SMT width override for kubelet-static's full-pcpus-only alignment.
+        # Empty ⇒ the CLI auto-detects.
+        MM_KUBELET_THREADS_PER_CORE: "{{ mm_kubelet_threads_per_core | default('') }}"
+        # LiteLLM auto-registration — only when auth_provider=litellm.
+        MM_LITELLM_ENABLED: "{{ 'true' if auth_provider | default('keycloak') == 'litellm' else 'false' }}"
+        MM_LITELLM_URL: "{{ 'http://litellm.' + (litellm_namespace | default('litellm')) + '.svc.cluster.local:4000' if auth_provider | default('keycloak') == 'litellm' else '' }}"
+        MM_LITELLM_MASTER_KEY: "{{ (_deploy_litellm_secret.resources[0].data.master_key | b64decode) if (auth_provider | default('keycloak') == 'litellm' and _deploy_litellm_secret.resources | default([]) | length > 0) else '' }}"
+        MM_LITELLM_KSERVE_URL: "http://envoy-gateway.{{ gateway_namespace | default('envoy-gateway-system') }}.svc.cluster.local"
+        # AIGatewayRoute unified endpoint — only when auth_provider=keycloak.
+        MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_provider | default('keycloak') == 'keycloak' else 'false' }}"
+        MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"
+        MM_EG_GATEWAY_NS: "{{ gateway_namespace | default('envoy-gateway-system') }}"
+      loop: "{{ _mm_model_names.stdout_lines }}"
+      loop_control:
+        label: "{{ item }}"
+      register: model_deployment
+      # Auto-deploy is a convenience: a single model failing to deploy (e.g. a
+      # gated model with no HF_TOKEN, or a transient download error) must NOT
+      # abort the whole install — the serving infrastructure is already up and
+      # other models may succeed. Record the outcome and continue; failures are
+      # summarised below. Set model_deploy_strict=true to make any failure fatal.
+      failed_when: model_deploy_strict | default(false) | bool and model_deployment.rc != 0
+
+    # Split the loop results into succeeded / failed for a clear summary.
+    - name: Summarise autodeploy outcomes
+      set_fact:
+        _mm_deployed_ok: "{{ model_deployment.results | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+        _mm_deployed_failed: "{{ model_deployment.results | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+
+    - name: Report auto-deploy results
+      debug:
+        msg: |
+          Auto-deploy summary:
+            Succeeded ({{ _mm_deployed_ok | length }}): {{ _mm_deployed_ok | join(', ') if _mm_deployed_ok | length else 'none' }}
+            Failed    ({{ _mm_deployed_failed | length }}): {{ _mm_deployed_failed | join(', ') if _mm_deployed_failed | length else 'none' }}
+          {% if _mm_deployed_failed | length %}
+
+          Some models did not deploy. Common cause: a gated model without HF_TOKEN.
+          Install continues (serving infrastructure is ready). Retry manually:
+            export HF_TOKEN=...        # for gated models (Llama, Mistral, …)
+            cd {{ _mm_dir }}
+            ./model-manager deploy <model-name> --wait
+          {% endif %}
+
+          Check status (via kubectl):
+            kubectl get llminferenceservices,inferenceservices -n {{ llm_services_namespace | default('llm-inference') }}
+      when: _mm_model_names.stdout_lines | length > 0
+
+    - name: Warn about failed auto-deploys
+      debug:
+        msg: "WARNING: {{ _mm_deployed_failed | length }} model(s) failed to auto-deploy: {{ _mm_deployed_failed | join(', ') }}. Install continued; deploy them manually (see summary above)."
+      when:
+        - _mm_model_names.stdout_lines | length > 0
+        - _mm_deployed_failed | length > 0
+
+    - name: Report that no models were auto-deployed
+      debug:
+        msg: |
+          No models were auto-deployed (none flagged `autodeploy: true` in the catalog).
+          Serving infrastructure is ready. Deploy models on demand:
+            cd {{ _mm_dir }}
+            ./model-manager deploy <model-name> --wait
+          Or set `autodeploy: true` on a model in {{ _mm_catalog }} and re-run install.
+      when: _mm_model_names.stdout_lines | length == 0
+
+  when: not skip_model_deployment
+
+- name: Show instructions for manual model deployment
+  debug:
+    msg: |
+      Model deployment was skipped.
+
+      To deploy models manually:
+        cd {{ inference_extension_dir }}/model_manager
+        ./model-manager deploy <model-name> --wait
+
+      Models available in the catalog are listed in:
+        {{ env_dir | default(inference_extension_dir ~ '/model_manager') }}/models.yaml
+  when: skip_model_deployment

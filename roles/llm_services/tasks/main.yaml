@@ -1,0 +1,3 @@
+---
+- name: "llm_services | Dispatch action: {{ component_action }}"
+  ansible.builtin.include_tasks: "{{ component_action }}.yaml"

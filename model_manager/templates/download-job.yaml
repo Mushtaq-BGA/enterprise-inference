@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: download-{{MODEL_NAME}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: download-{{MODEL_NAME}}
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{TIMEOUT}}
+  # Garbage-collect the finished Job (and its pod) automatically once it
+  # completes or fails, so a successful download never leaves a stray pod
+  # behind even if the model-manager CLI has already exited. The window is
+  # long enough to inspect logs of a failed job before it is reaped.
+  ttlSecondsAfterFinished: {{TTL_SECONDS}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: download-{{MODEL_NAME}}
+        app.kubernetes.io/managed-by: model-manager
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        # uid/gid match the serving pod for this runtime so prepared files are
+        # readable by the server (vLLM=1000, OVMS=5000). fsGroup makes the kubelet
+        # chown the mounted volume to this GID and mount it group-writable —
+        # without it, dynamically provisioned volumes (e.g. rancher.io/local-path)
+        # are created root:root 0755 and the non-root job gets "Permission denied".
+        runAsUser: {{JOB_UID}}
+        runAsGroup: {{JOB_GID}}
+        fsGroup: {{JOB_GID}}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: downloader
+          image: {{DOWNLOADER_IMAGE}}
+          command:
+            - sh
+            - -c
+            - |
+{{DOWNLOAD_CMD}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          # Bound the job (CWE-400). Requests stay small so this transient job
+          # schedules easily; the memory limit tracks the model's serving
+          # envelope so OVMS `ovms --pull` conversion/quantization does not OOM.
+          resources:
+            requests:
+              cpu: "{{DL_CPU_REQUEST}}"
+              memory: "{{DL_MEM_REQUEST}}"
+            limits:
+              cpu: "{{DL_CPU_LIMIT}}"
+              memory: "{{DL_MEM_LIMIT}}"
+{{ENV_BLOCK}}
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+      volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: {{PVC_NAME}}
