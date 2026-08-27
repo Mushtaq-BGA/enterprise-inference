@@ -70,4 +70,4 @@ kubectl get aigatewayroute -A          # ai_gateway_provider=envoy
 ```
 
 For platform-level problems — cluster, storage, certificates, DNS — see the
-[solutions documentation](https://github.com/Mushtaq-BGA/enterprise-ai-solutions/blob/main/docs/README.md).
+[solutions documentation](https://github.com/intel/enterprise-ai-solutions/blob/main/docs/README.md).

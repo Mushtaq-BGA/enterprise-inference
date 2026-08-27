@@ -30,7 +30,7 @@ env/<name>/global_config.yaml       platform settings (base_domain_name, auth_pr
 > `config.yaml` is checked into this repo, so it applies to **every** environment.
 > Anything environment-specific — domain, auth provider, storage — belongs in the
 > platform's `env/<name>/global_config.yaml` instead. See the
-> [solutions Configuration Reference](https://github.com/Mushtaq-BGA/enterprise-ai-solutions/blob/main/docs/customize/configuration.md).
+> [solutions Configuration Reference](https://github.com/intel/enterprise-ai-solutions/blob/main/docs/customize/configuration.md).
 
 ### Do I need to change anything?
 
